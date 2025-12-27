@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace rose_planner {
-
+enum SearchState : int { SUCCESS = 0, NO_PATH = 1, TIMEOUT = 2 };
 class PathSearch {
 public:
     using Path = std::vector<Eigen::Vector3f>;
@@ -66,7 +66,7 @@ public:
 
         q.push(seed);
         vis.insert(hash(seed));
-        int limit = 500;
+        int limit = 500000;
 
         static const int dx[8] = { 1, -1, 0, 0, 1, 1, -1, -1 };
         static const int dy[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };

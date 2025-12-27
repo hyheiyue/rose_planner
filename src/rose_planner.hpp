@@ -7,6 +7,7 @@
 #include "path_search.hpp"
 #include "replan_fsm.hpp"
 #include "rose_map/rose_map.hpp"
+#include "trajectory_sampler.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 
@@ -78,7 +79,6 @@ public:
                 searchOnce(goal_pos);
                 break;
             }
-
             case ReplanFSM::SEARCH_PATH: {
                 Eigen::Vector2f goal_w(
                     current_goal_.pose.position.x,
@@ -105,17 +105,30 @@ public:
 
         auto start_time = std::chrono::system_clock::now();
         PathSearch::Path path;
-        bool success = false;
+        SearchState search_state = SearchState::NO_PATH;
         try {
-            success = path_search_->search(start_w, goal_w, path);
+            search_state = path_search_->search(start_w, goal_w, path);
         } catch (std::exception& e) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), e.what());
         }
-        if (success) {
+        if (search_state==SearchState::SUCCESS) {
+            Eigen::Vector2f start_v = Eigen::Vector2f(
+                current_odom_.twist.twist.linear.x,
+                current_odom_.twist.twist.linear.y
+            );
+            auto traj = sampleTrajectoryTrapezoid(
+                path,
+                parameters_.path_search_params_.resampler.max_vel,
+                parameters_.path_search_params_.resampler.acc,
+                parameters_.path_search_params_.resampler.dec,
+                parameters_.path_search_params_.resampler.dt,
+                parameters_.path_search_params_.resampler.max_yaw_rate,
+                start_v
+            );
             auto end_time = std::chrono::system_clock::now();
             RCLCPP_INFO_STREAM(
                 node_->get_logger(),
-                "Path found: " << path.size() << " in "
+                "Path found: " << path.size() << " Traj sample: " << traj.size() << " in "
                                << std::chrono::duration_cast<std::chrono::milliseconds>(
                                       end_time - start_time
                                   )
@@ -124,18 +137,29 @@ public:
             );
 
             if (raw_path_pub_->get_subscription_count() > 0) {
-                for (auto& point: path) {
+                for (auto& point: traj) {
                     geometry_msgs::msg::PoseStamped pose_msg;
                     pose_msg.header = raw_path_msg.header;
-                    pose_msg.pose.position.x = point.x();
-                    pose_msg.pose.position.y = point.y();
+                    pose_msg.pose.position.x = point.p.x();
+                    pose_msg.pose.position.y = point.p.y();
                     pose_msg.pose.position.z = current_goal_.pose.position.z;
+                    float yaw = std::atan2(point.v.y(), point.v.x());
+                    tf2::Quaternion q;
+                    q.setRPY(0, 0, yaw);
+                    q.normalize();
+                    pose_msg.pose.orientation.x = q.x();
+                    pose_msg.pose.orientation.y = q.y();
+                    pose_msg.pose.orientation.z = q.z();
+                    pose_msg.pose.orientation.w = q.w();
                     raw_path_msg.poses.push_back(pose_msg);
                 }
                 raw_path_pub_->publish(raw_path_msg);
             }
-        } else {
+        } else if(search_state==SearchState::NO_PATH) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "No path found");
+        }else if (search_state==SearchState::TIMEOUT) {
+            RCLCPP_ERROR_STREAM(node_->get_logger(), "Search timeout,stop this goal plan");
+            replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
         }
     }
 
@@ -168,6 +192,7 @@ public:
             msg->pose.pose.position.z
         ));
         current_pose_ = msg->pose.pose;
+        current_odom_ = *msg;
     }
 
 private:
@@ -177,6 +202,7 @@ private:
     rose_map::RoseMap::Ptr rose_map_;
 
     geometry_msgs::msg::Pose current_pose_;
+    nav_msgs::msg::Odometry current_odom_;
     geometry_msgs::msg::PoseStamped current_goal_;
     ReplanFSM replan_fsm_;
 

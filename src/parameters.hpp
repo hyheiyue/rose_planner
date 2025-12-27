@@ -15,21 +15,40 @@ public:
             float obstacle_penalty_weight = 20.0f;
             float heuristic_weight = 1.0f;
             void load(rclcpp::Node& node) {
-                node.get_parameter_or<float>(
+                clearance_weight = node.declare_parameter<float>(
                     "path_search.a_star.clearance_weight",
-                    clearance_weight,
                     clearance_weight
                 );
-                node.get_parameter_or<float>(
+                obstacle_penalty_weight = node.declare_parameter<float>(
                     "path_search.a_star.obstacle_penalty_weight",
-                    obstacle_penalty_weight,
                     obstacle_penalty_weight
+                );
+                heuristic_weight = node.declare_parameter<float>(
+                    "path_search.a_star.heuristic_weight",
+                    heuristic_weight
                 );
             }
         } a_star;
-
+        struct ReSampler {
+            float max_vel = 3.0;
+            float acc = 2.0;
+            float dec = 2.0;
+            float dt = 0.1;
+            float max_yaw_rate = 1.0;
+            void load(rclcpp::Node& node) {
+                max_vel = node.declare_parameter<float>("path_search.resampler.max_vel", max_vel);
+                acc = node.declare_parameter<float>("path_search.resampler.acc", acc);
+                dec = node.declare_parameter<float>("path_search.resampler.dec", dec);
+                dt = node.declare_parameter<float>("path_search.resampler.dt", dt);
+                max_yaw_rate = node.declare_parameter<float>(
+                    "path_search.resampler.max_yaw_rate",
+                    max_yaw_rate
+                );
+            }
+        } resampler;
         void load(rclcpp::Node& node) {
             a_star.load(node);
+            resampler.load(node);
             std::vector<double> robot_size_vec =
                 node.declare_parameter("robot_size", std::vector<double> { 0.5, 0.5 });
             robot_size = Eigen::Vector2f(robot_size_vec[0], robot_size_vec[1]);
