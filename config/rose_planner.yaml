@@ -5,15 +5,13 @@ rose_planner_node:
     robot_size: [0.3, 0.3]
     path_search:
       a_star: 
-        clearance_weight: 5.0
+        clearance_weight: 2.0
         obstacle_penalty_weight: 10.0
         heuristic_weight: 1.0
       resampler:
         max_vel: 3.0
         acc: 2.0
-        dec: 2.0
-        max_yaw_rate: 1.0
-        dt: 0.05
+        dt: 0.1
     rose_map:
       log_time: true
       pointcloud_topic: /cloud_registered

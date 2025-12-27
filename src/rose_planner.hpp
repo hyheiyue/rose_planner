@@ -2,11 +2,11 @@
 #include "a*.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "jps.hpp"
 #include "parameters.hpp"
 #include "path_search.hpp"
 #include "replan_fsm.hpp"
 #include "rose_map/rose_map.hpp"
+#include "trajectory_opt.hpp"
 #include "trajectory_sampler.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -23,7 +23,7 @@ public:
 
         rose_map_ = std::make_shared<rose_map::RoseMap>(node);
         path_search_ = SearchType::create(rose_map_, parameters_);
-
+        traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
         odometry_sub_ = node.create_subscription<nav_msgs::msg::Odometry>(
             odom_topic,
@@ -45,7 +45,7 @@ public:
         );
 
         raw_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("raw_path", 10);
-
+        opt_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("opt_path", 10);
         timer_ = node.create_wall_timer(
             std::chrono::milliseconds(100),
             std::bind(&RosePlanner::timerCallback, this)
@@ -97,7 +97,9 @@ public:
         nav_msgs::msg::Path raw_path_msg;
         raw_path_msg.header.stamp = node_->now();
         raw_path_msg.header.frame_id = "map";
-
+        nav_msgs::msg::Path opt_path_msg;
+        opt_path_msg.header.stamp = node_->now();
+        opt_path_msg.header.frame_id = "map";
         RCLCPP_INFO_STREAM(
             node_->get_logger(),
             "Start: " << start_w.transpose() << " Goal: " << goal_w.transpose()
@@ -111,20 +113,25 @@ public:
         } catch (std::exception& e) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), e.what());
         }
-        if (search_state==SearchState::SUCCESS) {
+        if (search_state == SearchState::SUCCESS) {
             Eigen::Vector2f start_v = Eigen::Vector2f(
                 current_odom_.twist.twist.linear.x,
                 current_odom_.twist.twist.linear.y
             );
             auto traj = sampleTrajectoryTrapezoid(
                 path,
-                parameters_.path_search_params_.resampler.max_vel,
                 parameters_.path_search_params_.resampler.acc,
-                parameters_.path_search_params_.resampler.dec,
+                parameters_.path_search_params_.resampler.max_vel,
                 parameters_.path_search_params_.resampler.dt,
-                parameters_.path_search_params_.resampler.max_yaw_rate,
                 start_v
             );
+            traj_opt_->setSampledPath(
+                traj,
+                parameters_.path_search_params_.resampler.dt,
+                start_v.cast<double>()
+            );
+            traj_opt_->optimize();
+            auto opt_traj = traj_opt_->getTrajectory();
             auto end_time = std::chrono::system_clock::now();
             RCLCPP_INFO_STREAM(
                 node_->get_logger(),
@@ -155,9 +162,20 @@ public:
                 }
                 raw_path_pub_->publish(raw_path_msg);
             }
-        } else if(search_state==SearchState::NO_PATH) {
+            if (opt_path_pub_->get_subscription_count() > 0) {
+                for (auto& point: opt_traj) {
+                    geometry_msgs::msg::PoseStamped pose_msg;
+                    pose_msg.header = opt_path_msg.header;
+                    pose_msg.pose.position.x = point.x();
+                    pose_msg.pose.position.y = point.y();
+                    pose_msg.pose.position.z = current_goal_.pose.position.z;
+                    opt_path_msg.poses.push_back(pose_msg);
+                }
+                opt_path_pub_->publish(opt_path_msg);
+            }
+        } else if (search_state == SearchState::NO_PATH) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "No path found");
-        }else if (search_state==SearchState::TIMEOUT) {
+        } else if (search_state == SearchState::TIMEOUT) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "Search timeout,stop this goal plan");
             replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
         }
@@ -200,7 +218,7 @@ private:
     rclcpp::Node* node_;
     SearchType::Ptr path_search_;
     rose_map::RoseMap::Ptr rose_map_;
-
+    TrajectoryOpt::Ptr traj_opt_;
     geometry_msgs::msg::Pose current_pose_;
     nav_msgs::msg::Odometry current_odom_;
     geometry_msgs::msg::PoseStamped current_goal_;
@@ -211,6 +229,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr opt_path_pub_;
 };
 
 } // namespace rose_planner

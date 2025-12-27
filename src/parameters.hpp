@@ -32,18 +32,11 @@ public:
         struct ReSampler {
             float max_vel = 3.0;
             float acc = 2.0;
-            float dec = 2.0;
             float dt = 0.1;
-            float max_yaw_rate = 1.0;
             void load(rclcpp::Node& node) {
                 max_vel = node.declare_parameter<float>("path_search.resampler.max_vel", max_vel);
                 acc = node.declare_parameter<float>("path_search.resampler.acc", acc);
-                dec = node.declare_parameter<float>("path_search.resampler.dec", dec);
                 dt = node.declare_parameter<float>("path_search.resampler.dt", dt);
-                max_yaw_rate = node.declare_parameter<float>(
-                    "path_search.resampler.max_yaw_rate",
-                    max_yaw_rate
-                );
             }
         } resampler;
         void load(rclcpp::Node& node) {
