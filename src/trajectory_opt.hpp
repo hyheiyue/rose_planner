@@ -77,8 +77,8 @@ public:
         );
         if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
             if (ret > 0) {
-                std::cout << "[Smooth Optimize] Optimization Success: "
-                          << lbfgs::lbfgs_strerror(ret) << std::endl;
+                // std::cout << "[Smooth Optimize] Optimization Success: "
+                //           << lbfgs::lbfgs_strerror(ret) << std::endl;
             } else if (ret == 0) {
                 std::cout << "[Smooth Optimize] Optimization STOP: " << lbfgs::lbfgs_strerror(ret)
                           << std::endl;
