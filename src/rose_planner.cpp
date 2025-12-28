@@ -10,19 +10,21 @@
 #include "trajectory_sampler.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+
 namespace rose_planner {
 struct RosePlanner::Impl {
 public:
     using SearchType = AStar;
 
-    Impl(rclcpp::Node& node) {
+    Impl(rclcpp::Node& node): tf_buffer_(node.get_clock()) {
         node_ = &node;
         parameters_.load(node);
 
         rose_map_ = std::make_shared<rose_map::RoseMap>(node);
         path_search_ = SearchType::create(rose_map_, parameters_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
-
+        target_frame_ = node.declare_parameter<std::string>("target_frame", "");
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
         odometry_sub_ = node.create_subscription<nav_msgs::msg::Odometry>(
             odom_topic,
@@ -298,11 +300,11 @@ public:
     void resampleAndOpt(const std::vector<Eigen::Vector2d>& path) {
         nav_msgs::msg::Path raw_path_msg;
         raw_path_msg.header.stamp = node_->now();
-        raw_path_msg.header.frame_id = "map";
+        raw_path_msg.header.frame_id = target_frame_;
 
         nav_msgs::msg::Path opt_path_msg;
         opt_path_msg.header.stamp = node_->now();
-        opt_path_msg.header.frame_id = "map";
+        opt_path_msg.header.frame_id = target_frame_;
 
         Eigen::Vector2d start_v(
             current_odom_.twist.twist.linear.x,
@@ -365,43 +367,148 @@ public:
     }
 
     void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        try {
+            auto tf =
+                tf_buffer_.lookupTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
+            T = tf2ToEigen(tf);
+        } catch (...) {
+            RCLCPP_WARN(node_->get_logger(), "[TF] goalPoseCallback transform failed → identity");
+        }
+
+        Eigen::Vector4f p(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, 1.0f);
+        p = T * p;
+        geometry_msgs::msg::PoseStamped goal_out = *msg;
+        goal_out.header.frame_id = target_frame_;
+        goal_out.pose.position.x = p.x();
+        goal_out.pose.position.y = p.y();
+        goal_out.pose.position.z = p.z();
+
         RCLCPP_INFO(
             node_->get_logger(),
-            "Received PoseStamped goal [%.2f, %.2f]",
-            msg->pose.position.x,
-            msg->pose.position.y
+            "Received PoseStamped goal (target_frame) [%.2f, %.2f]",
+            goal_out.pose.position.x,
+            goal_out.pose.position.y
         );
-        current_goal_ = *msg;
+
+        current_goal_ = goal_out;
         replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
     }
 
     void goalPointCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
-        RCLCPP_INFO(
-            node_->get_logger(),
-            "Received PointStamped goal [%.2f, %.2f]",
-            msg->point.x,
-            msg->point.y
-        );
-
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        try {
+            auto tf =
+                tf_buffer_.lookupTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
+            T = tf2ToEigen(tf);
+        } catch (...) {
+            RCLCPP_WARN(node_->get_logger(), "[TF] goalPointCallback transform failed → identity");
+        }
+        Eigen::Vector4f p(msg->point.x, msg->point.y, msg->point.z, 1.0f);
+        p = T * p;
         geometry_msgs::msg::PoseStamped pose;
         pose.header = msg->header;
-        pose.pose.position.x = msg->point.x;
-        pose.pose.position.y = msg->point.y;
-        pose.pose.position.z = msg->point.z;
+        pose.header.frame_id = target_frame_;
+        pose.header.stamp = msg->header.stamp;
+        pose.pose.position.x = p.x();
+        pose.pose.position.y = p.y();
+        pose.pose.position.z = p.z();
         pose.pose.orientation.w = 1.0;
+
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "Received PointStamped goal (target_frame) [%.2f, %.2f]",
+            pose.pose.position.x,
+            pose.pose.position.y
+        );
 
         current_goal_ = pose;
         replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
     }
 
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        rose_map_->setOrigin(Eigen::Vector3f(
-            msg->pose.pose.position.x,
-            msg->pose.pose.position.y,
-            msg->pose.pose.position.z
-        ));
-        current_pose_ = msg->pose.pose;
-        current_odom_ = *msg;
+        const auto& odom_in = *msg;
+
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        tf2::Transform tf2_T = tf2::Transform::getIdentity();
+        tf2::Quaternion q_in;
+
+        try {
+            auto tf = tf_buffer_.lookupTransform(
+                target_frame_,
+                odom_in.header.frame_id,
+                odom_in.header.stamp
+            );
+            T = tf2ToEigen(tf);
+            tf2::fromMsg(tf.transform, tf2_T);
+
+            tf2::fromMsg(odom_in.pose.pose.orientation, q_in);
+            q_in = tf2_T.getRotation() * q_in;
+            q_in.normalize();
+        } catch (...) {
+            RCLCPP_WARN(node_->get_logger(), "[TF] odomCallback transform failed → identity");
+            tf2::fromMsg(odom_in.pose.pose.orientation, q_in);
+        }
+
+        Eigen::Vector4f p(
+            odom_in.pose.pose.position.x,
+            odom_in.pose.pose.position.y,
+            odom_in.pose.pose.position.z,
+            1.0f
+        );
+        p = T * p;
+
+        geometry_msgs::msg::Pose pose_out;
+        pose_out.position.x = p.x();
+        pose_out.position.y = p.y();
+        pose_out.position.z = p.z();
+        pose_out.orientation = tf2::toMsg(q_in);
+
+        current_pose_ = pose_out;
+
+        tf2::Vector3 vlin(
+            odom_in.twist.twist.linear.x,
+            odom_in.twist.twist.linear.y,
+            odom_in.twist.twist.linear.z
+        );
+        vlin = tf2_T.getBasis() * vlin;
+
+        tf2::Vector3 vang(
+            odom_in.twist.twist.angular.x,
+            odom_in.twist.twist.angular.y,
+            odom_in.twist.twist.angular.z
+        );
+        vang = tf2_T.getBasis() * vang;
+
+        nav_msgs::msg::Odometry odom_out = odom_in;
+        odom_out.header.frame_id = target_frame_;
+        odom_out.pose.pose.position.x = p.x();
+        odom_out.pose.pose.position.y = p.y();
+        odom_out.pose.pose.position.z = p.z();
+        odom_out.pose.pose.orientation = tf2::toMsg(q_in);
+
+        odom_out.twist.twist.linear.x = vlin.x();
+        odom_out.twist.twist.linear.y = vlin.y();
+        odom_out.twist.twist.linear.z = vlin.z();
+        odom_out.twist.twist.angular.x = vang.x();
+        odom_out.twist.twist.angular.y = vang.y();
+        odom_out.twist.twist.angular.z = vang.z();
+
+        current_odom_ = odom_out;
+
+        rose_map_->setOrigin(Eigen::Vector3f(p.x(), p.y(), p.z()));
+    }
+
+    Eigen::Matrix4f tf2ToEigen(const geometry_msgs::msg::TransformStamped& tf) {
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        const auto& t = tf.transform.translation;
+        const auto& q = tf.transform.rotation;
+        Eigen::Quaternionf Q(q.w, q.x, q.y, q.z);
+        T.block<3, 3>(0, 0) = Q.toRotationMatrix();
+        T(0, 3) = t.x;
+        T(1, 3) = t.y;
+        T(2, 3) = t.z;
+        return T;
     }
 
 private:
@@ -420,13 +527,15 @@ private:
 
     std::vector<Eigen::Vector2d> current_path_;
     std::vector<Eigen::Vector2d> current_raw_path_;
-
+    std::string target_frame_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr opt_path_pub_;
+    tf2_ros::Buffer tf_buffer_;
+    tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
 };
 
 RosePlanner::RosePlanner(rclcpp::Node& node) {

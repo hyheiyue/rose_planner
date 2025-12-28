@@ -1,11 +1,9 @@
 #pragma once
 #include "parameters.hpp"
 #include "rose_map/rose_map.hpp"
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <queue>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 

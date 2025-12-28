@@ -4,8 +4,6 @@
 #include <Eigen/Geometry>
 #include <cfloat>
 #include <cmath>
-#include <iostream>
-#include <vector>
 namespace rose_planner {
 class BandedSystem {
 public:

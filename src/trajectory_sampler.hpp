@@ -3,7 +3,6 @@
 #include <Eigen/QR>
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <vector>
 
 namespace rose_planner {

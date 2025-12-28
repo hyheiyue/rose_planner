@@ -2,6 +2,7 @@ rose_planner_node:
   ros__parameters:
     odom_topic: /Odometry
     goal_topic: /rose_goal
+    target_frame: map
     robot_size: [0.2, 0.2]
     path_search:
       a_star: 
@@ -14,10 +15,11 @@ rose_planner_node:
         dt: 0.1
     trajectory_opt:
       smooth_weight: 1.0
-      obstacle_weight: 1.1
+      obstacle_weight: 0.7
     rose_map:
       log_time: true
       pointcloud_topic: /cloud_registered
+      target_frame: map
       sensor_frame: front_mid360
       max_update_rate: 10
       occ_map:

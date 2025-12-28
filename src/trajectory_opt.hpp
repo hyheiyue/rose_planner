@@ -159,40 +159,50 @@ public:
         return cost;
     }
 
-    Eigen::Vector2d obstacleTerm(int /*idx*/, Eigen::Vector2d xcur, double& nearest_cost) {
+    Eigen::Vector2d obstacleTerm(int, const Eigen::Vector2d& xcur, double& nearest_cost) {
         nearest_cost = 0.0;
-        Eigen::Vector2d gradient(0.0, 0.0);
+        Eigen::Vector2d grad(0.0, 0.0);
 
-        const double R = 1.0; /// 影响半径（可调）
-        double esdf_dist = 0.0;
-        Eigen::Vector2d esdf_grad(0.0, 0.0);
+        const double R = 1.0; // 影响半径
+        double d = 0.0;
+        Eigen::Vector2d g(0.0, 0.0);
 
-        // 从 ESDF 插值并得到梯度（世界坐标）
-        bool ok = sampleEsdfAndGrad(xcur, esdf_dist, esdf_grad);
-        if (!ok) {
-            // 无效采样（超出地图或其它原因），认为安全
-            return gradient;
+        if (!sampleEsdfAndGrad(xcur, d, g) || !std::isfinite(d))
+            return grad; // 采样失败视为安全
+
+        if (d > R)
+            return grad; // 超出影响范围无代价
+
+        // 计算穿透量
+        double penetration = R - d;
+
+        // 安全距离权重增强（线性而非平方，避免梯度爆炸）
+        double safe_margin = params_.robot_radius + 0.1;
+        double w_safe = 1.0;
+        if (d < safe_margin) {
+            w_safe += 4.0 * (safe_margin - d) / safe_margin; // 归一化增强
         }
 
-        // 如果距离大于影响半径，则不计代价
-        if (!std::isfinite(esdf_dist) || esdf_dist > R) {
-            return gradient;
+        // 代价使用 Huber-like 平滑截断，避免不稳定
+        double cost_core = penetration * penetration;
+        double huber_delta = 0.6;
+        if (penetration > huber_delta) {
+            cost_core = 2 * huber_delta * penetration - huber_delta * huber_delta;
         }
 
-        // 代价：二次穿透代价 (R - d)^2
+        nearest_cost = w_obs * cost_core * w_safe;
 
-        double penetration = (R - esdf_dist);
-        double weight_min_safe = 1.0;
-        if (esdf_dist < params_.robot_radius) {
-            weight_min_safe *= (1 + (params_.robot_radius - esdf_dist));
+        // 梯度公式：∇cost = w * cost'(penetration) * (-∇d)
+        double grad_core_coeff = 2.0 * penetration;
+        if (penetration > huber_delta) {
+            grad_core_coeff = 2.0 * huber_delta;
         }
-        nearest_cost = w_obs * penetration * penetration * weight_min_safe;
 
-        // d/dx [ w * (R - d(x))^2 ] = 2 * w * (R - d(x)) * (- grad d(x))
-        // 注意：esdf_grad 指向距离增大的方向（∇d）
-        gradient = w_obs * 2.0 * penetration * (-esdf_grad) * weight_min_safe;
+        double coeff = w_obs * grad_core_coeff * w_safe;
 
-        return gradient;
+        grad = coeff * (-g);
+
+        return grad;
     }
 
     bool sampleEsdfAndGrad(const Eigen::Vector2d& pos, double& out_dist, Eigen::Vector2d& out_grad)
