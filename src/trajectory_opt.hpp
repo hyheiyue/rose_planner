@@ -95,7 +95,6 @@ public:
         }
     }
 
-
     static double cost(void* ptr, const Eigen::VectorXd& x, Eigen::VectorXd& g) {
         auto instance = reinterpret_cast<TrajectoryOpt*>(ptr);
         const int points_num = instance->ctx_.pieceNum - 1;
@@ -153,7 +152,6 @@ public:
         return cost;
     }
 
-
     Eigen::Vector2d obstacleTerm(int /*idx*/, Eigen::Vector2d xcur, double& nearest_cost) {
         nearest_cost = 0.0;
         Eigen::Vector2d gradient(0.0, 0.0);
@@ -185,55 +183,70 @@ public:
         return gradient;
     }
 
-    bool sampleEsdfAndGrad(const Eigen::Vector2d &pos, double &out_dist, Eigen::Vector2d &out_grad) const {
-        if (!rose_map_) return false;
+    bool sampleEsdfAndGrad(const Eigen::Vector2d& pos, double& out_dist, Eigen::Vector2d& out_grad)
+        const {
+        if (!rose_map_)
+            return false;
+        const float vs = rose_map_->acc_map_info_.voxel_size_;
+        if (!(vs > 0.f))
+            return false;
 
-        const double vs = static_cast<double>(rose_map_->acc_map_info_.voxel_size_);
-        if (vs <= 0.0) return false;
+        // 转为 key
+        Eigen::Vector2f pos2f(pos.x(), pos.y());
+        auto key = rose_map_->worldToKey2D(pos2f);
+        if (rose_map_->key2DToIndex2D(key) < 0)
+            return false;
 
-        // 得到包含 pos 的格子 key 与该格中心的世界坐标
-        Eigen::Vector2f pos2f(static_cast<float>(pos.x()), static_cast<float>(pos.y()));
-        rose_map::VoxelKey2D key = rose_map_->worldToKey2D(pos2f);
-        Eigen::Vector3f _center = rose_map_->key2DToWorld(key);
-        Eigen::Vector2f center = _center.head<2>();
-        // 计算 pos 在该格子内的相对偏移 fx, fy ∈ [0,1]
-        double fx = (pos.x() - static_cast<double>(center.x())) / vs + 0.5;
-        double fy = (pos.y() - static_cast<double>(center.y())) / vs + 0.5;
-        fx = std::min(std::max(fx, 0.0), 1.0);
-        fy = std::min(std::max(fy, 0.0), 1.0);
-
-        // 四个角格子键
-        rose_map::VoxelKey2D k00 = key;
-        rose_map::VoxelKey2D k10 = { key.x + 1, key.y };
-        rose_map::VoxelKey2D k01 = { key.x, key.y + 1 };
-        rose_map::VoxelKey2D k11 = { key.x + 1, key.y + 1 };
-
-        auto readEsdf = [&](const rose_map::VoxelKey2D &k)->double {
+        auto read = [&](int dx, int dy) {
+            rose_map::VoxelKey2D k { key.x + dx, key.y + dy };
             int idx = rose_map_->key2DToIndex2D(k);
-            if (idx < 0) {
-                // out of bounds -> treat as very large distance (safe)
-                return 1e3;
-            }
-            return static_cast<double>(rose_map_->esdf_[idx]);
+            if (idx < 0)
+                return 1000.0;
+            double d = rose_map_->esdf_[idx];
+            return std::isfinite(d) ? d : 1000.0;
         };
 
-        double v00 = readEsdf(k00);
-        double v10 = readEsdf(k10);
-        double v01 = readEsdf(k01);
-        double v11 = readEsdf(k11);
+        // 取 x 方向 3 点（y 固定在 key.y, key.y+1 两行形成 2×3）
+        double x0 = read(-1, 0), x1 = read(0, 0), x2 = read(1, 0);
+        double x3 = read(-1, 1), x4 = read(0, 1), x5 = read(1, 1);
 
-        // 双线性插值
-        double v0 = v00 * (1.0 - fx) + v10 * fx;
-        double v1 = v01 * (1.0 - fx) + v11 * fx;
-        double val = v0 * (1.0 - fy) + v1 * fy;
+        // 取 y 方向 3 点（x 固定在 key.x, key.x+1 两列形成 3×2，但我们分别对两列拟合）
+        double y0 = read(0, -1), y1 = read(0, 0), y2 = read(0, 1);
+        double y3 = read(1, -1), y4 = read(1, 0), y5 = read(1, 1);
 
-        // 插值对世界坐标的偏导数
-        double dv_dx = ((v10 - v00) * (1.0 - fy) + (v11 - v01) * fy) / vs;
-        double dv_dy = ((v01 - v00) * (1.0 - fx) + (v11 - v10) * fx) / vs;
+        // 先对 x 方向两行分别二次拟合，再在 fy 方向线性插值两个二次函数的结果
+        auto fitQuad = [&](double p0, double p1, double p2, double f) {
+            // 解二次系数 a,b,c 使得 f(0)=p1, f(-1)=p0, f(1)=p2
+            double a = 0.5f * (p2 + p0 - 2.f * p1);
+            double b = 0.5f * (p2 - p0);
+            double c = p1;
+            // 计算插值值
+            double v = a * (f * f) + b * f + c;
+            // 计算导数
+            double g = 2.f * a * f + b;
+            return std::pair<double, double> { v, g };
+        };
 
-        out_dist = val;
-        out_grad.x() = dv_dx;
-        out_grad.y() = dv_dy;
+        double fx = (pos2f.x() - (key.x + 0.5f) * vs) / vs; // 相对 cell 中心偏移 [-0.5,0.5]
+        fx = std::clamp(fx, -0.5, 0.5);
+        double fy = (pos2f.y() - (key.y + 0.5f) * vs) / vs;
+        fy = std::clamp(fy, -0.5, 0.5);
+
+        auto r0 = fitQuad(x0, x1, x2, fx);
+        auto r1 = fitQuad(x3, x4, x5, fx);
+        double valx = r0.first * (1.f - (fy + 0.5f)) + r1.first * (fy + 0.5f);
+        double gradx = r0.second * (1.f - (fy + 0.5f)) + r1.second * (fy + 0.5f);
+
+        // 同理 y 方向：两列分别二次拟合，再在 fx 方向线性插值
+        auto s0 = fitQuad(y0, y1, y2, fy);
+        auto s1 = fitQuad(y3, y4, y5, fy);
+        double valy = s0.first * (1.f - (fx + 0.5f)) + s1.first * (fx + 0.5f);
+        double grady = s0.second * (1.f - (fx + 0.5f)) + s1.second * (fx + 0.5f);
+
+        // 最终距离取 x/y 拟合的均衡融合（也可以只用距离场值，梯度用 (gradx, grady)）
+        out_dist = 0.5f * (valx + valy);
+        out_grad.x() = gradx;
+        out_grad.y() = grady;
 
         return true;
     }
@@ -259,7 +272,7 @@ public:
 
     lbfgs::lbfgs_parameter lbfgs_params_;
     float robot_radius_;
-    float wObstacle = 1.0;
+    double wObstacle = 1.0;
 };
 
 } // namespace rose_planner

@@ -105,7 +105,11 @@ public:
             "Start: " << start_w.transpose() << " Goal: " << goal_w.transpose()
         );
 
-        auto start_time = std::chrono::system_clock::now();
+        using Clock = std::chrono::system_clock;
+        using Ms = std::chrono::milliseconds;
+
+        auto t0_total = Clock::now();
+        auto t1_search_start = Clock::now();
         PathSearch::Path path;
         SearchState search_state = SearchState::NO_PATH;
         try {
@@ -113,11 +117,13 @@ public:
         } catch (std::exception& e) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), e.what());
         }
+        auto t1_search_end = Clock::now();
         if (search_state == SearchState::SUCCESS) {
-            Eigen::Vector2f start_v = Eigen::Vector2f(
+            Eigen::Vector2f start_v(
                 current_odom_.twist.twist.linear.x,
                 current_odom_.twist.twist.linear.y
             );
+            auto t2_sample_start = Clock::now();
             auto traj = sampleTrajectoryTrapezoid(
                 path,
                 parameters_.path_search_params_.resampler.acc,
@@ -125,24 +131,17 @@ public:
                 parameters_.path_search_params_.resampler.dt,
                 start_v
             );
+            auto t3_set_start = Clock::now();
             traj_opt_->setSampledPath(
                 traj,
                 parameters_.path_search_params_.resampler.dt,
                 start_v.cast<double>()
             );
-            traj_opt_->optimize();
-            auto opt_traj = traj_opt_->getTrajectory();
-            auto end_time = std::chrono::system_clock::now();
-            RCLCPP_INFO_STREAM(
-                node_->get_logger(),
-                "Path found: " << path.size() << " Traj sample: " << traj.size() << " in "
-                               << std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      end_time - start_time
-                                  )
-                                      .count()
-                               << " ms"
-            );
 
+            traj_opt_->optimize();
+            auto t3_set_end = Clock::now();
+
+            auto opt_traj = traj_opt_->getTrajectory();
             if (raw_path_pub_->get_subscription_count() > 0) {
                 for (auto& point: traj) {
                     geometry_msgs::msg::PoseStamped pose_msg;
@@ -173,10 +172,24 @@ public:
                 }
                 opt_path_pub_->publish(opt_path_msg);
             }
+
+            auto t_end_total = Clock::now();
+            RCLCPP_INFO_STREAM(
+                node_->get_logger(),
+                "Planning Time (ms) | A*: "
+                    << std::chrono::duration_cast<Ms>(t1_search_end - t1_search_start).count()
+                    << " | Resample: "
+                    << std::chrono::duration_cast<Ms>(t2_sample_start - t1_search_end).count()
+                    << " | Optimize: "
+                    << std::chrono::duration_cast<Ms>(t3_set_end - t3_set_start).count()
+                    << " | Total: "
+                    << std::chrono::duration_cast<Ms>(t_end_total - t0_total).count()
+            );
+
         } else if (search_state == SearchState::NO_PATH) {
             RCLCPP_ERROR_STREAM(node_->get_logger(), "No path found");
         } else if (search_state == SearchState::TIMEOUT) {
-            RCLCPP_ERROR_STREAM(node_->get_logger(), "Search timeout,stop this goal plan");
+            RCLCPP_ERROR_STREAM(node_->get_logger(), "Search timeout, stop this goal plan");
             replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
         }
     }
