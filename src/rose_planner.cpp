@@ -106,20 +106,9 @@ public:
                 }
 
                 auto unsafe_points = checkSafePath(current_path_);
-                if (unsafe_points.empty()) {
-                    RCLCPP_DEBUG(
-                        node_->get_logger(),
-                        "Current path safe, performing optimization only"
-                    );
-                    onlyOpt();
-                } else {
-                    RCLCPP_WARN(
-                        node_->get_logger(),
-                        "Detected %zu unsafe point(s), triggering local replan",
-                        unsafe_points.size()
-                    );
-                    localReplan(unsafe_points, goal_pos);
-                }
+
+                localReplan(unsafe_points, goal_pos);
+
                 break;
             }
 
@@ -150,53 +139,18 @@ public:
         return unsafe_points;
     }
 
-    int findClosestPointIndex(
-        const Eigen::Vector2d& start_w,
-        const std::vector<Eigen::Vector2d>& current_path
-    ) {
-        if (current_path.empty())
-            return -1;
-
-        constexpr double MATCH_DIST2 = 1.0 * 1.0;
-        int best_index = 0;
-        double best_dist2 = std::numeric_limits<double>::infinity();
-        int first_forward_match = -1;
-
-        for (int i = 0; i < (int)current_path.size(); ++i) {
-            double dx = current_path[i].x() - start_w.x();
-            double dy = current_path[i].y() - start_w.y();
-            double dist2 = dx * dx + dy * dy;
-
-            if (dist2 < best_dist2) {
-                best_dist2 = dist2;
-                best_index = i;
-            }
-
-            if (first_forward_match == -1 && dist2 < MATCH_DIST2) {
-                first_forward_match = i;
-                break;
-            }
-        }
-
-        return (first_forward_match != -1) ? first_forward_match : best_index;
-    }
-
     void localReplan(const std::vector<int>& unsafe_points, const Eigen::Vector2f& goal_w) {
-        if (unsafe_points.empty() || current_raw_path_.empty())
+        if (current_raw_path_.empty())
             return;
-
-        nav_msgs::msg::Path raw_path_msg, opt_path_msg;
-        raw_path_msg.header.stamp = opt_path_msg.header.stamp = node_->now();
-        raw_path_msg.header.frame_id = opt_path_msg.header.frame_id = "map";
-
-        int local_start_idx = unsafe_points.front();
-        int local_end_idx = unsafe_points.back();
         int N = (int)current_raw_path_.size();
-
-        local_start_idx = std::clamp(local_start_idx, 0, N - 1);
+        int local_end_idx;
+        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
+        if (unsafe_points.empty()) {
+            local_end_idx = findClosestPointIndex(start_w, current_raw_path_);
+        } else {
+            local_end_idx = unsafe_points.back();
+        }
         local_end_idx = std::clamp(local_end_idx, 0, N - 1);
-        if (local_start_idx > local_end_idx)
-            return;
 
         std::vector<Eigen::Vector2d> path_after(
             current_raw_path_.begin() + local_end_idx + 1,
@@ -205,8 +159,6 @@ public:
 
         PathSearch::Path local_path;
         SearchState search_state = SearchState::NO_PATH;
-
-        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
 
         try {
             search_state = path_search_->search(
@@ -241,27 +193,43 @@ public:
 
         resampleAndOpt(current_raw_path_);
     }
+    int findClosestPointIndex(
+        const Eigen::Vector2d& start_w,
+        const std::vector<Eigen::Vector2d>& current_path
+    ) {
+        if (current_path.empty())
+            return -1;
 
-    void onlyOpt() {
-        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
-        int idx = findClosestPointIndex(start_w, current_raw_path_);
+        constexpr double TARGET_DIST = 1.5; // 目标 1.5m
+        constexpr double TOLERANCE = 0.3; // 允许误差 ±0.3m
+        constexpr double TARGET_DIST2 = TARGET_DIST * TARGET_DIST;
 
-        if (idx == -1) {
-            RCLCPP_WARN(
-                node_->get_logger(),
-                "No valid point on current path, triggering global search"
-            );
-            replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
-            return;
+        int best_index = 0;
+        double best_diff2 = std::numeric_limits<double>::infinity();
+        int best_target_index = -1;
+
+        for (int i = 0; i < (int)current_path.size(); ++i) {
+            double dx = current_path[i].x() - start_w.x();
+            double dy = current_path[i].y() - start_w.y();
+            double dist2 = dx * dx + dy * dy;
+
+            double diff2 = std::abs(dist2 - TARGET_DIST2);
+
+            // 记录全局最接近 1.5m 的点
+            if (diff2 < best_diff2) {
+                best_diff2 = diff2;
+                best_index = i;
+                best_target_index = i;
+            }
+
+            // 头部优先匹配 1.5m ± TOLERANCE
+            double dist = std::sqrt(dist2);
+            if (dist > TARGET_DIST - TOLERANCE && dist < TARGET_DIST + TOLERANCE) {
+                return i; // 头部优先命中直接返回
+            }
         }
 
-        if (idx != 0) {
-            current_raw_path_.erase(current_raw_path_.begin(), current_raw_path_.begin() + idx);
-            RCLCPP_DEBUG(node_->get_logger(), "Path trimmed from index %d to start", idx);
-        }
-
-        current_raw_path_[0] = start_w;
-        resampleAndOpt(current_raw_path_);
+        return best_target_index != -1 ? best_target_index : best_index;
     }
 
     void searchOnce(const Eigen::Vector2f& goal_w) {

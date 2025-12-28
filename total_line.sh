@@ -5,7 +5,7 @@ WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo -e "${yellow}\n<--- Total Lines --->${reset}"
     total=$(find "$WORK_DIR" \
         -type d \( \
-            -path "$BUILD_DIR" -o \
+            -path "$WORK_DIR/build" -o \
             -path "$WORK_DIR/model" -o \
             -path "$WORK_DIR/3rdparty" -o \
             -path "$WORK_DIR/.cache" \

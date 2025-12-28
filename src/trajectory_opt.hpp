@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cfloat>
-#include <limits>
 #include <memory>
 
 namespace rose_planner {
