@@ -2,7 +2,7 @@ rose_planner_node:
   ros__parameters:
     odom_topic: /Odometry
     goal_topic: /rose_goal
-    robot_size: [0.3, 0.3]
+    robot_size: [0.2, 0.2]
     path_search:
       a_star: 
         clearance_weight: 2.0
@@ -14,7 +14,7 @@ rose_planner_node:
         dt: 0.1
     trajectory_opt:
       smooth_weight: 1.0
-      obstacle_weight: 0.9
+      obstacle_weight: 1.1
     rose_map:
       log_time: true
       pointcloud_topic: /cloud_registered
@@ -45,6 +45,6 @@ rose_planner_node:
         kernel_size: 3
         dilate_iter: 1
         use_static_map: true
-        static_map_path: "/home/hy/wust_nav2/src/bringup_nav/map/simulation/rmuc_2026.yaml"
+        static_map_path: "/home/hy/wust_nav2/src/bringup_nav/map/simulation/rmuc_2025.yaml"
       esdf:
         use_diagonals: true

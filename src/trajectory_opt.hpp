@@ -181,12 +181,17 @@ public:
         }
 
         // 代价：二次穿透代价 (R - d)^2
+
         double penetration = (R - esdf_dist);
-        nearest_cost = w_obs * penetration * penetration;
+        double weight_min_safe = 1.0;
+        if (esdf_dist < params_.robot_radius) {
+            weight_min_safe *= (1 + (params_.robot_radius - esdf_dist));
+        }
+        nearest_cost = w_obs * penetration * penetration * weight_min_safe;
 
         // d/dx [ w * (R - d(x))^2 ] = 2 * w * (R - d(x)) * (- grad d(x))
         // 注意：esdf_grad 指向距离增大的方向（∇d）
-        gradient = w_obs * 2.0 * penetration * (-esdf_grad);
+        gradient = w_obs * 2.0 * penetration * (-esdf_grad) * weight_min_safe;
 
         return gradient;
     }

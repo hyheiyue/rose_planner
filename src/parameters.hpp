@@ -8,7 +8,14 @@ public:
     void load(rclcpp::Node& node) {
         path_search_params_.load(node);
         opt_params.load(node);
+        std::vector<double> robot_size_vec =
+            node.declare_parameter("robot_size", std::vector<double> { 0.5, 0.5 });
+        robot_size = Eigen::Vector2f(robot_size_vec[0], robot_size_vec[1]);
+        robot_radius =
+            0.5f * std::sqrt(robot_size.x() * robot_size.x() + robot_size.y() * robot_size.y());
     }
+    Eigen::Vector2f robot_size = Eigen::Vector2f(0.5f, 0.5f);
+    double robot_radius;
     struct OptParams {
         double smooth_weight = 1.0;
         double obstacle_weight = 1.0;
@@ -20,7 +27,6 @@ public:
         }
     } opt_params;
     struct PathSearchParams {
-        Eigen::Vector2f robot_size = Eigen::Vector2f(0.5f, 0.5f);
         struct AStar {
             float clearance_weight = 5.0f;
             float obstacle_penalty_weight = 20.0f;
@@ -54,9 +60,6 @@ public:
         void load(rclcpp::Node& node) {
             a_star.load(node);
             resampler.load(node);
-            std::vector<double> robot_size_vec =
-                node.declare_parameter("robot_size", std::vector<double> { 0.5, 0.5 });
-            robot_size = Eigen::Vector2f(robot_size_vec[0], robot_size_vec[1]);
         }
     } path_search_params_;
 };

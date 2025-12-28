@@ -13,15 +13,13 @@ namespace rose_planner {
 enum SearchState : int { SUCCESS = 0, NO_PATH = 1, TIMEOUT = 2 };
 class PathSearch {
 public:
-    using Path = std::vector<Eigen::Vector3f>;
+    using Path = std::vector<Eigen::Vector2d>;
     using Ptr = std::shared_ptr<PathSearch>;
 
     explicit PathSearch(rose_map::RoseMap::Ptr rose_map, Parameters params):
         rose_map_(rose_map),
         params_(params) {
-        auto robot_size = params_.path_search_params_.robot_size;
-        robot_radius_ =
-            0.5f * std::sqrt(robot_size.x() * robot_size.x() + robot_size.y() * robot_size.y());
+        robot_radius_ = params_.robot_radius;
     }
 
     static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {

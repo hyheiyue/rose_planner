@@ -3,9 +3,9 @@
 
 namespace rose_planner {
 struct SampleTrajectoryPoint {
-    Eigen::Vector2f p;
-    Eigen::Vector2f v;
-    float t;
+    Eigen::Vector2d p;
+    Eigen::Vector2d v;
+    double t;
 };
 
 } // namespace rose_planner
