@@ -7,8 +7,10 @@
 #include <iostream>
 #include <vector>
 namespace rose_planner {
-class BandedSystemNoTime { /// 1.0版本
+class BandedSystem {
 public:
+    // The size of A, as well as the lower/upper
+    // banded width p/q are needed
     inline void create(const int& n, const int& p, const int& q) {
         // In case of re-creating before destroying
         destroy();
@@ -16,7 +18,7 @@ public:
         lowerBw = p;
         upperBw = q;
         int actualSize = N * (lowerBw + upperBw + 1);
-        ptrData = new double[actualSize]; // 带状矩阵所有的有效数据
+        ptrData = new double[actualSize];
         std::fill_n(ptrData, actualSize, 0.0);
         return;
     }
@@ -29,16 +31,11 @@ public:
         return;
     }
 
-    inline void operator=(const BandedSystemNoTime& bs) {
-        ptrData = nullptr;
-        create(bs.N, bs.lowerBw, bs.upperBw);
-        memcpy(ptrData, bs.ptrData, N * (lowerBw + upperBw + 1) * sizeof(double));
-    }
-
 private:
     int N;
     int lowerBw;
     int upperBw;
+    // Compulsory nullptr initialization here
     double* ptrData = nullptr;
 
 public:
@@ -57,7 +54,7 @@ public:
         return ptrData[(i - j + upperBw) * N + j];
     }
 
-    // 进行带状 LU 分解。该函数将原始矩阵 A 转化为 LU 分解形式
+    // This function conducts banded LU factorization in place
     // Note that NO PIVOT is applied on the matrix "A" for efficiency!!!
     inline void factorizeLU() {
         int iM, jM;
@@ -136,8 +133,6 @@ public:
         }
         return;
     }
-
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
 };
 
 class CubicSpline {
@@ -152,7 +147,7 @@ private:
     Eigen::Vector2d headP;
     Eigen::Vector2d tailP;
     Eigen::Vector2d headV;
-    BandedSystemNoTime A;
+    BandedSystem A;
     Eigen::VectorXd T1; // 时间向量
     Eigen::MatrixX2d b;
     Eigen::MatrixX2d gradc;

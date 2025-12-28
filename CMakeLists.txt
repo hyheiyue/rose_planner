@@ -36,7 +36,7 @@ find_package(yaml-cpp REQUIRED)
 find_package(TBB REQUIRED)
 find_package(rose_map REQUIRED)
 find_package(OpenCV REQUIRED)
-
+find_package(Ceres REQUIRED)
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -51,6 +51,7 @@ target_link_libraries(${PROJECT_NAME}
     Eigen3::Eigen
     yaml-cpp
     TBB::tbb
+    ${CERES_LIBRARIES}
 )
 ament_target_dependencies(${PROJECT_NAME}
     rclcpp

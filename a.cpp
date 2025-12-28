@@ -808,3 +808,281 @@ private:
 };
 
 } // namespace rose_planner
+void TrajectoryOpt::optimize() {
+    if (ctx_.skip) {
+        ctx_.skip = false;
+        ctx_.path.clear();
+        return;
+    }
+
+    const int points_num = ctx_.pieceNum - 1;
+    const int num_vars = points_num * 2;
+
+    Eigen::VectorXd x(num_vars);
+    for (int i = 0; i < points_num; ++i) {
+        x(i) = ctx_.path[i + 1].x();
+        x(i + points_num) = ctx_.path[i + 1].y();
+    }
+
+    // Wrapper that adapts our computeCostAndGrad to Ceres' GradientProblem::Function
+    struct CeresFunc: public ceres::GradientProblem::Function {
+        TrajectoryOpt* self;
+        int num_params;
+        CeresFunc(TrajectoryOpt* s, int n): self(s), num_params(n) {}
+
+        // parameters: pointer to array of doubles length num_params
+        // cost: pointer to a single double where the cost is stored
+        // gradient: pointer to array of doubles length num_params for gradient
+        virtual bool
+        Evaluate(const double* parameters, double* cost, double* gradient) const override {
+            // Map parameters into Eigen vector
+            Eigen::Map<const Eigen::VectorXd> xmap(parameters, num_params);
+
+            Eigen::VectorXd g;
+            double c = 0.0;
+            self->computeCostAndGrad(xmap, c, g);
+
+            if (cost) {
+                *cost = c;
+            }
+            if (gradient) {
+                // copy g -> gradient
+                for (int i = 0; i < num_params; ++i) {
+                    gradient[i] = g(i);
+                }
+            }
+            return true;
+        }
+
+        virtual int NumParameters() const override {
+            return num_params;
+        }
+    };
+
+    CeresFunc fun(this, num_vars);
+    ceres::GradientProblem problem(&fun);
+
+    // Configure solver options (feel free to tune)
+    ceres::GradientProblemSolver::Options options;
+    options.max_num_iterations = 200;
+    options.minimizer_type = ceres::LBFGS; // use L-BFGS inside Ceres
+    options.logging_type = ceres::PER_MINIMIZER_ITERATION;
+    options.line_search_type = ceres::ARMIJO;
+    options.max_num_line_search_steps = 50;
+    options.num_threads = 1; // tune as needed
+    ceres::GradientProblemSolver::Summary summary;
+
+    // Solve in-place on x.data()
+    ceres::Solve(options, problem, x.data(), &summary);
+
+    // Print solver summary (brief)
+    std::cout << "[Ceres Optimize] Summary: " << summary.BriefReport() << std::endl;
+
+    // If solver succeeded (or at least returned), update ctx_.path with the optimized points
+    for (int i = 0; i < points_num; ++i) {
+        ctx_.path[i + 1].x() = x(i);
+        ctx_.path[i + 1].y() = x(i + points_num);
+    }
+
+    ctx_.pathInPs.resize(2, points_num);
+    ctx_.pathInPs.row(0) = x.head(points_num).transpose();
+    ctx_.pathInPs.row(1) = x.tail(points_num).transpose();
+}
+
+#pragma once
+#include "common.hpp"
+#include "cubic_spline.hpp"
+#include "parameters.hpp"
+#include "rose_map/rose_map.hpp"
+
+#include <algorithm>
+#include <cfloat>
+#include <iostream>
+#include <limits>
+#include <memory>
+
+#include <ceres/ceres.h>
+
+namespace rose_planner {
+
+class TrajectoryOpt {
+public:
+    using Ptr = std::shared_ptr<TrajectoryOpt>;
+
+    TrajectoryOpt(rose_map::RoseMap::Ptr rose_map, Parameters params):
+        rose_map_(rose_map),
+        params_(params) {
+        auto robot_size = params_.path_search_params_.robot_size;
+        robot_radius_ =
+            0.5f * std::sqrt(robot_size.x() * robot_size.x() + robot_size.y() * robot_size.y());
+    }
+
+    static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {
+        return std::make_shared<TrajectoryOpt>(rose_map, params);
+    }
+
+    void setSampledPath(
+        const std::vector<SampleTrajectoryPoint>& sampled,
+        double sample_dt,
+        Eigen::Vector2d init_v = Eigen::Vector2d(0, 0)
+    ) {
+        if (sampled.size() < 5) {
+            ctx_.skip = true;
+            return;
+        }
+        ctx_.path.clear();
+        for (const auto& pt: sampled) {
+            ctx_.path.push_back(pt.p.cast<double>());
+        }
+        ctx_.head_pos = ctx_.path.front();
+        ctx_.tail_pos = ctx_.path.back();
+        ctx_.pieceNum = static_cast<int>(ctx_.path.size()) - 1;
+        ctx_.sample_dt = sample_dt;
+        cubSpline_.setConditions(ctx_.head_pos, init_v, ctx_.tail_pos, ctx_.pieceNum);
+    }
+
+    // Ceres 优化主入口
+    void optimize() {
+        if (ctx_.skip) {
+            ctx_.skip = false;
+            ctx_.path.clear();
+            return;
+        }
+
+        const int N = ctx_.pieceNum - 1; // inner control points count
+        const int param_size = 2 * N; // [x..., y...]
+
+        std::vector<double> param(param_size);
+
+        // 初始化参数
+        for (int i = 0; i < N; ++i) {
+            param[i] = ctx_.path[i + 1].x();
+            param[i + N] = ctx_.path[i + 1].y();
+        }
+
+        ceres::Problem problem;
+
+        // 1. 添加样条平滑项
+        problem.AddResidualBlock(
+            new ceres::AutoDiffCostFunction<SmoothnessCost, 1, ceres::DYNAMIC>(
+                new SmoothnessCost(this),
+                1,
+                param_size
+            ),
+            nullptr,
+            param.data()
+        );
+
+        // 2. 添加障碍势场项（每个控制点一个残差块）
+        for (int i = 0; i < N; ++i) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<ObstacleCost, 1, 1, 1>(
+                    new ObstacleCost(this, i),
+                    1
+                ),
+                nullptr,
+                &param[i],
+                &param[i + N]
+            );
+        }
+
+        // 配置求解器
+        ceres::Solver::Options options;
+        options.max_num_iterations = 200;
+        options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+        options.minimizer_progress_to_stdout = true;
+
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+        std::cout << summary.FullReport() << std::endl;
+
+        // 写回优化结果
+        for (int i = 0; i < N; ++i) {
+            ctx_.path[i + 1].x() = param[i];
+            ctx_.path[i + 1].y() = param[i + N];
+        }
+
+        ctx_.pathInPs.resize(2, N);
+        for (int i = 0; i < N; ++i) {
+            ctx_.pathInPs(0, i) = param[i];
+            ctx_.pathInPs(1, i) = param[i + N];
+        }
+    }
+
+    std::vector<Eigen::Vector2d> getTrajectory() const {
+        return ctx_.path;
+    }
+
+private:
+    // ========== Ceres 代价项定义 ==========
+
+    // 样条平滑能量残差
+    struct SmoothnessCost {
+        explicit SmoothnessCost(TrajectoryOpt* opt): opt_(opt) {}
+
+        template<typename T>
+        bool operator()(const T* x, T* residual) const {
+            const int N = opt_->ctx_.pieceNum - 1;
+            Eigen::Matrix<T, 2, Eigen::Dynamic> inPs(2, N);
+            for (int i = 0; i < N; ++i) {
+                inPs(0, i) = x[i];
+                inPs(1, i) = x[i + N];
+            }
+
+            Eigen::Matrix<T, Eigen::Dynamic, 1> inTimes(opt_->ctx_.pieceNum);
+            for (int i = 0; i < opt_->ctx_.pieceNum; ++i) {
+                inTimes(i) = T(opt_->ctx_.sample_dt);
+            }
+
+            opt_->cubSpline_.setInnerPoints(inPs, inTimes);
+
+            double energy_val = 0.0;
+            opt_->cubSpline_.getEnergy(energy_val);
+            residual[0] = T(energy_val);
+            return true;
+        }
+
+        TrajectoryOpt* opt_;
+    };
+
+    // ESDF 势场残差
+    struct ObstacleCost {
+        ObstacleCost(TrajectoryOpt* opt, int i): opt_(opt), i_(i) {}
+
+        template<typename T>
+        bool operator()(const T* px, const T* py, T* residual) const {
+            double cost_val = 0.0;
+            Eigen::Vector2d pos(px[0], py[0]);
+            Eigen::Vector2d grad = opt_->obstacleTerm(i_, pos, cost_val);
+            residual[0] = T(cost_val);
+            return true;
+        }
+
+        TrajectoryOpt* opt_;
+        int i_;
+    };
+
+public:
+    // ========== 你原本的 ESDF 采样和障碍势函数保持不变 ==========
+
+private:
+    struct Ctx {
+        std::vector<Eigen::Vector2d> path;
+        Eigen::Vector2d head_pos;
+        Eigen::Vector2d tail_pos;
+        Eigen::Matrix2Xd pathInPs;
+        int pieceNum = 0;
+        double sample_dt = 0.0;
+        bool init_obs = true;
+        bool skip = false;
+    } ctx_;
+
+    rose_map::RoseMap::Ptr rose_map_;
+    Parameters params_;
+    CubicSpline cubSpline_;
+
+    float robot_radius_;
+    double wObstacle = 1.0;
+};
+
+} // namespace rose_planner

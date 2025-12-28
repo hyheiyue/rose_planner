@@ -7,7 +7,18 @@ class Parameters {
 public:
     void load(rclcpp::Node& node) {
         path_search_params_.load(node);
+        opt_params.load(node);
     }
+    struct OptParams {
+        double smooth_weight = 1.0;
+        double obstacle_weight = 1.0;
+        void load(rclcpp::Node& node) {
+            smooth_weight =
+                node.declare_parameter<float>("trajectory_opt.smooth_weight", smooth_weight);
+            obstacle_weight =
+                node.declare_parameter<float>("trajectory_opt.obstacle_weight", obstacle_weight);
+        }
+    } opt_params;
     struct PathSearchParams {
         Eigen::Vector2f robot_size = Eigen::Vector2f(0.5f, 0.5f);
         struct AStar {
@@ -29,6 +40,7 @@ public:
                 );
             }
         } a_star;
+
         struct ReSampler {
             float max_vel = 3.0;
             float acc = 2.0;

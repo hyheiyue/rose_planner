@@ -18,9 +18,8 @@ public:
     TrajectoryOpt(rose_map::RoseMap::Ptr rose_map, Parameters params):
         rose_map_(rose_map),
         params_(params) {
-        auto robot_size = params_.path_search_params_.robot_size;
-        robot_radius_ =
-            0.5f * std::sqrt(robot_size.x() * robot_size.x() + robot_size.y() * robot_size.y());
+        w_obs = params_.opt_params.obstacle_weight;
+        w_smooth = params_.opt_params.smooth_weight;
     }
     static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {
         return std::make_shared<TrajectoryOpt>(rose_map, params);
@@ -67,19 +66,26 @@ public:
         lbfgs_params_.max_linesearch = 32; // 32
         lbfgs_params_.f_dec_coeff = 1.0e-4;
         lbfgs_params_.s_curv_coeff = 0.9;
-        int ret =
-            lbfgs::lbfgs_optimize(x, minCost, &TrajectoryOpt::cost, nullptr, this, lbfgs_params_);
+        int ret = lbfgs::lbfgs_optimize(
+            x,
+            minCost,
+            &TrajectoryOpt::cost,
+            nullptr,
+            nullptr,
+            this,
+            lbfgs_params_
+        );
         if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
             if (ret > 0) {
-                std::cout << "[Smooth Optimize] Optimization Success: " << lbfgs::lbfgs_stderr(ret)
-                          << std::endl;
+                std::cout << "[Smooth Optimize] Optimization Success: "
+                          << lbfgs::lbfgs_strerror(ret) << std::endl;
             } else if (ret == 0) {
-                std::cout << "[Smooth Optimize] Optimization STOP: " << lbfgs::lbfgs_stderr(ret)
+                std::cout << "[Smooth Optimize] Optimization STOP: " << lbfgs::lbfgs_strerror(ret)
                           << std::endl;
             } else {
                 std::cout
                     << "[Smooth Optimize] Optimization reaches the maximum number of evaluations: "
-                    << lbfgs::lbfgs_stderr(ret) << std::endl;
+                    << lbfgs::lbfgs_strerror(ret) << std::endl;
             }
 
             for (int i = 0; i < ctx_.pieceNum - 1; i++) {
@@ -91,7 +97,7 @@ public:
             ctx_.pathInPs.row(1) = x.segment(ctx_.pieceNum - 1, ctx_.pieceNum - 1);
         } else {
             ctx_.path.clear();
-            std::cout << "[Smooth Optimize] Optimization Failed: " << lbfgs::lbfgs_stderr(ret);
+            std::cout << "[Smooth Optimize] Optimization Failed: " << lbfgs::lbfgs_strerror(ret);
         }
     }
 
@@ -127,6 +133,8 @@ public:
 
         instance->cubSpline_.getEnergy(energy); // 能量损失cost和梯度
         instance->cubSpline_.getGradSmooth(energy_grad, energyT_grad);
+        energy_grad *= instance->w_smooth;
+        energy = energy * instance->w_smooth;
         cost += energy;
         grad += energy_grad;
 
@@ -174,11 +182,11 @@ public:
 
         // 代价：二次穿透代价 (R - d)^2
         double penetration = (R - esdf_dist);
-        nearest_cost = static_cast<double>(wObstacle) * penetration * penetration;
+        nearest_cost = w_obs * penetration * penetration;
 
         // d/dx [ w * (R - d(x))^2 ] = 2 * w * (R - d(x)) * (- grad d(x))
         // 注意：esdf_grad 指向距离增大的方向（∇d）
-        gradient = static_cast<double>(wObstacle) * 2.0 * penetration * (-esdf_grad);
+        gradient = w_obs * 2.0 * penetration * (-esdf_grad);
 
         return gradient;
     }
@@ -270,9 +278,9 @@ public:
     Parameters params_;
     CubicSpline cubSpline_;
 
-    lbfgs::lbfgs_parameter lbfgs_params_;
-    float robot_radius_;
-    double wObstacle = 1.0;
+    lbfgs::lbfgs_parameter_t lbfgs_params_;
+    double w_obs = 1.0;
+    double w_smooth = 1.0;
 };
 
 } // namespace rose_planner

@@ -1,79 +1,150 @@
-#pragma once
+#ifndef LBFGS_HPP
+#define LBFGS_HPP
 
 #include <Eigen/Eigen>
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 
 namespace lbfgs {
-struct lbfgs_parameter {
+// ----------------------- Data Type Part -----------------------
+
+/**
+     * L-BFGS optimization parameters.
+     */
+struct lbfgs_parameter_t {
     /**
-         * 近似逆 hessian 矩阵的修正次数,即为LBFGS的窗口长度
-         *该参数控制有限内存的大小，默认值为8 小于 3 的值不建议
+         * The number of corrections to approximate the inverse hessian matrix.
+         *  The L-BFGS routine stores the computation results of previous m
+         *  iterations to approximate the inverse hessian matrix of the current
+         *  iteration. This parameter controls the size of the limited memories
+         *  (corrections). The default value is 8. Values less than 3 are
+         *  not recommended. Large values will result in excessive computing time.
          */
     int mem_size = 8;
-    /**
-         * Epsilon 用于梯度收敛测试。 不要在不光滑的情况下使用
-         * 将其设置为 0.0 并对 非平滑函数 使用基于过去增量的测试
-         * 终止于||g(x)||_inf / max(1, ||x||_inf) < g_epsilon,
-         * 实际上，该值应大于 1.0e-6，因为L-BFGS不会直接减少一阶残差，它仍然需要函数值
-         */
-    double g_epsilon = 1.0e-4;
-    /**
-         * 基于增量的收敛测试的距离，此参数确定迭代中的距离，以计算成本函数的下降率
-         * 如果该参数的值为零，则库不执行基于增量的收敛测试。 默认值为 3
-         */
 
-    int past = 3;
     /**
-         * 收敛测试的Delta，该参数决定了cost function的最小下降率
-         * 当出现以下情况时，库将停止迭代满足条件   |f' - f| / max(1, |f|) < delta
-         * 其中 f'是过去迭代之前的成本值，f是当前迭代的成本值
+         * Epsilon for grad convergence test. DO NOT USE IT in nonsmooth cases! 
+         *  Set it to 0.0 and use past-delta-based test for nonsmooth functions.
+         *  This parameter determines the accuracy with which the solution is to
+         *  be found. A minimization terminates when
+         *      ||g(x)||_inf / max(1, ||x||_inf) < g_epsilon,
+         *  where ||.||_inf is the infinity norm. The default value is 1.0e-5. 
+         *  This should be greater than 1.0e-6 in practice because L-BFGS does 
+         *  not directly reduce first-order residual. It still needs the function 
+         *  value which can be corrupted by machine_prec when ||g|| is small.
          */
-    double delta = 1.0e-5;
-    int max_iterations = 0; //最大迭代次数，如果等于0 ，则为直到收敛或出现错误
+    double g_epsilon = 1.0e-5;
+
     /**
-         * 线搜索的最大尝试次数，该参数控制函数和梯度评估的数量
-         * 线搜索例程的每次迭代。 默认值为 64
+         * Distance for delta-based convergence test.
+         *  This parameter determines the distance, in iterations, to compute
+         *  the rate of decrease of the cost function. If the value of this
+         *  parameter is zero, the library does not perform the delta-based
+         *  convergence test. The default value is 3.
+         */
+    int past = 3;
+
+    /**
+         * Delta for convergence test.
+         *  This parameter determines the minimum rate of decrease of the
+         *  cost function. The library stops iterations when the following 
+         *  condition is met:
+         *      |f' - f| / max(1, |f|) < delta,
+         *  where f' is the cost value of past iterations ago, and f is
+         *  the cost value of the current iteration.
+         *  The default value is 1.0e-6.
+         */
+    double delta = 1.0e-6;
+
+    /**
+         * The maximum number of iterations.
+         *  The lbfgs_optimize() function terminates an minimization process with
+         *  ::LBFGSERR_MAXIMUMITERATION status code when the iteration count
+         *  exceedes this parameter. Setting this parameter to zero continues an
+         *  minimization process until a convergence or error. The default value
+         *  is 0.
+         */
+    int max_iterations = 0;
+
+    /**
+         * The maximum number of trials for the line search.
+         *  This parameter controls the number of function and gradients evaluations
+         *  per iteration for the line search routine. The default value is 64.
          */
     int max_linesearch = 64;
+
     /**
-         * 线搜索例程的最小与最大步长， 默认值为 1.0e-20  1.0e+20
+         * The minimum step of the line search routine.
+         *  The default value is 1.0e-20. This value need not be modified unless
+         *  the exponents are too large for the machine being used, or unless the
+         *  problem is extremely badly scaled (in which case the exponents should
+         *  be increased).
          */
-    double min_step = 1.0e-10;
-    double max_step = 1.0e+10;
+    double min_step = 1.0e-20;
+
     /**
-         * 控制线搜索例程精度的参数，保证充分下降条件的参数c1
-         * 默认值为 1.0e-4。 这个参数应该大一些大于零且小于 1.0
+         * The maximum step of the line search.
+         *  The default value is 1.0e+20. This value need not be modified unless
+         *  the exponents are too large for the machine being used, or unless the
+         *  problem is extremely badly scaled (in which case the exponents should
+         *  be increased).
+         */
+    double max_step = 1.0e+20;
+
+    /**
+         * A parameter to control the accuracy of the line search routine.
+         *  The default value is 1.0e-4. This parameter should be greater
+         *  than zero and smaller than 1.0.
          */
     double f_dec_coeff = 1.0e-4;
+
     /**
-         * 控制线搜索例程精度的参数,保证曲率条件的参数c2， 默认值为 0.9
-         * 将此参数设置为较小的值可能会有利，典型的小值为0.1，这个参数应该是大于f_dec_coeff参数并小于1.0
+         * A parameter to control the accuracy of the line search routine.
+         *  The default value is 0.9. If the function and gradient
+         *  evaluations are inexpensive with respect to the cost of the
+         *  iteration (which is sometimes the case when solving very large
+         *  problems) it may be advantageous to set this parameter to a small
+         *  value. A typical small value is 0.1. This parameter should be
+         *  greater than the f_dec_coeff parameter and smaller than 1.0.
          */
     double s_curv_coeff = 0.9;
+
     /**
-         * 确保非凸函数全局收敛的参数，默认值为 1.0e-6
-         * 执行Cautious-LBFGS
+         * A parameter to ensure the global convergence for nonconvex functions.
+         *  The default value is 1.0e-6. The parameter performs the so called 
+         *  cautious update for L-BFGS, especially when the convergence is 
+         *  not sufficient. The parameter must be positive but might as well 
+         *  be less than 1.0e-3 in practice.
          */
     double cautious_factor = 1.0e-6;
-    double machine_prec = 1.0e-16; // 浮点值的机器精度。 默认值为 1.0e-16
+
+    /**
+         * The machine precision for floating-point values. The default is 1.0e-16. 
+         *  This parameter must be a positive value set by a client program to
+         *  estimate the machine precision.
+         */
+    double machine_prec = 1.0e-16;
 };
 
+/**
+     * Return values of lbfgs_optimize().
+     *  Roughly speaking, a negative value indicates an error.
+     */
 enum {
-    /**LBFGS收敛*/
+    /** L-BFGS reaches convergence. */
     LBFGS_CONVERGENCE = 0,
-    /**L-BFGS满足停止标准*/
+    /** L-BFGS satisfies stopping criteria. */
     LBFGS_STOP,
-    /**迭代已被回调取消*/
+    /** The iteration has been canceled by the monitor callback. */
     LBFGS_CANCELED,
-    /**未知错误*/
+
+    /** Unknown error. */
     LBFGSERR_UNKNOWNERROR = -1024,
-    /**指定的变量数量无效*/
+    /** Invalid number of variables specified. */
     LBFGSERR_INVALID_N,
-    /**指定的参数 lbfgs_parameter_t::mem_size 无效*/
+    /** Invalid parameter lbfgs_parameter_t::mem_size specified. */
     LBFGSERR_INVALID_MEMSIZE,
-    /**指定的参数 lbfgs_parameter_t::g_epsilon 无效*/
+    /** Invalid parameter lbfgs_parameter_t::g_epsilon specified. */
     LBFGSERR_INVALID_GEPSILON,
     /** Invalid parameter lbfgs_parameter_t::past specified. */
     LBFGSERR_INVALID_TESTPERIOD,
@@ -91,37 +162,77 @@ enum {
     LBFGSERR_INVALID_MACHINEPREC,
     /** Invalid parameter lbfgs_parameter_t::max_linesearch specified. */
     LBFGSERR_INVALID_MAXLINESEARCH,
-    /**函数值变为NaN or Inf. */
+    /** The function value became NaN or Inf. */
     LBFGSERR_INVALID_FUNCVAL,
-    /**线搜索步长变得小于 lbfgs_parameter_t::min_step*/
+    /** The line-search step became smaller than lbfgs_parameter_t::min_step. */
     LBFGSERR_MINIMUMSTEP,
-    /**线搜索步长变得大于 lbfgs_parameter_t::max_step*/
+    /** The line-search step became larger than lbfgs_parameter_t::max_step. */
     LBFGSERR_MAXIMUMSTEP,
-    /**线搜索达到最大值，不满足假设或无法达到精度*/
+    /** Line search reaches the maximum, assumptions not satisfied or precision not achievable.*/
     LBFGSERR_MAXIMUMLINESEARCH,
-    /**算法例程达到最大迭代次数*/
+    /** The algorithm routine reaches the maximum number of iterations. */
     LBFGSERR_MAXIMUMITERATION,
-    /**相对搜索间隔宽度至少为 lbfgs_parameter_t::machine_prec*/
+    /** Relative search interval width is at least lbfgs_parameter_t::machine_prec. */
     LBFGSERR_WIDTHTOOSMALL,
-    /**发生逻辑错误（无效的line search步骤）*/
+    /** A logic error (negative line-search step) occurred. */
     LBFGSERR_INVALIDPARAMETERS,
-    /**当前搜索方向增加成本函数值*/
+    /** The current search direction increases the cost function value. */
     LBFGSERR_INCREASEGRADIENT,
 };
 
 /**
-     * 定义回调函数指针，提供cost function和梯度评估
-     * x 变量的当前值     g 梯度向量。 回调函数必须计算当前变量的梯度值
-     * instance 客户端发送给 lbfgs_optimize() 函数的用户数据
-     * retval double 当前变量的成本函数值
+     * Callback interface to provide cost function and gradient evaluations.
+     *
+     *  The lbfgs_optimize() function call this function to obtain the values of cost
+     *  function and its gradients when needed. A client program must implement
+     *  this function to evaluate the values of the cost function and its
+     *  gradients, given current values of variables.
+     *  
+     *  @param  instance    The user data sent for lbfgs_optimize() function by the client.
+     *  @param  x           The current values of variables.
+     *  @param  g           The gradient vector. The callback function must compute
+     *                      the gradient values for the current variables.
+     *  @retval double      The value of the cost function for the current variables.
      */
 typedef double (*lbfgs_evaluate_t)(void* instance, const Eigen::VectorXd& x, Eigen::VectorXd& g);
+
 /**
-      * 回调接口来监控最小化过程的进度, 此功能，客户端程序可以存储或显示当前进度.如果不使用，则设置为nullptr即可
-      * fx 成本函数的当前值     step 用于本次迭代的线搜索步骤       ls 本次迭代调用的评估次数
-      * k 迭代次数      x,g 变量的当前值与梯度值
-      * retval int 清零以继续最小化过程.返回一个非零值将取消最小化过程
-      */
+     * Callback interface to provide an upper bound at the beginning of the current line search.
+     *
+     *  The lbfgs_optimize() function call this function to obtain the values of the
+     *  upperbound of the stepsize to search in, provided with the beginning values of
+     *  variables before the line search, and the current step vector (can be descent direction). 
+     *  A client program can implement this function for more efficient linesearch. Any step 
+     *  larger than this bound should not be considered. For example, it has a very large or even 
+     *  inf function value. Note that the function value at the provided bound should be FINITE!
+     *  If it is not used, just set it nullptr.
+     *  
+     *  @param  instance    The user data sent for lbfgs_optimize() function by the client.
+     *  @param  xp          The values of variables before current line search.
+     *  @param  d           The step vector. It can be the descent direction.
+     *  @retval double      The upperboud of the step in current line search routine,
+     *                      such that (stpbound * d) is the maximum reasonable step.
+     */
+typedef double (*lbfgs_stepbound_t
+)(void* instance, const Eigen::VectorXd& xp, const Eigen::VectorXd& d);
+
+/**
+     * Callback interface to monitor the progress of the minimization process.
+     *
+     *  The lbfgs_optimize() function call this function for each iteration. Implementing
+     *  this function, a client program can store or display the current progress
+     *  of the minimization process. If it is not used, just set it nullptr.
+     *
+     *  @param  instance    The user data sent for lbfgs_optimize() function by the client.
+     *  @param  x           The current values of variables.
+     *  @param  g           The current gradient values of variables.
+     *  @param  fx          The current value of the cost function.
+     *  @param  step        The line-search step used for this iteration.
+     *  @param  k           The iteration count.
+     *  @param  ls          The number of evaluations called for this iteration.
+     *  @retval int         Zero to continue the minimization process. Returning a
+     *                      non-zero value will cancel the minimization process.
+     */
 typedef int (*lbfgs_progress_t
 )(void* instance,
   const Eigen::VectorXd& x,
@@ -137,90 +248,114 @@ typedef int (*lbfgs_progress_t
 struct callback_data_t {
     void* instance = nullptr;
     lbfgs_evaluate_t proc_evaluate = nullptr;
+    lbfgs_stepbound_t proc_stepbound = nullptr;
     lbfgs_progress_t proc_progress = nullptr;
 };
 
-/**
-     * 该函数执行线搜索来查找同时满足 Armijo条件和弱 Wolfe条件的点
-     * @param x
-     * @param f
-     * @param g
-     * @param stp
-     * @param d
-     * @param xp
-     * @param gp
-     * @param stpmin
-     * @param stpmax
-     * @param cd
-     * @param param
-     * @return
-     */
+// ----------------------- L-BFGS Part -----------------------
 
-inline int line_search_wolfe_condition(
+/**
+     * Line search method for smooth or nonsmooth functions.
+     *  This function performs line search to find a point that satisfy 
+     *  both the Armijo condition and the weak Wolfe condition. It is 
+     *  as robust as the backtracking line search but further applies 
+     *  to continuous and piecewise smooth functions where the strong 
+     *  Wolfe condition usually does not hold.
+     *
+     *  @see
+     *      Adrian S. Lewis and Michael L. Overton. Nonsmooth optimization 
+     *      via quasi-Newton methods. Mathematical Programming, Vol 141, 
+     *      No 1, pp. 135-163, 2013.
+     */
+inline int line_search_lewisoverton(
     Eigen::VectorXd& x,
     double& f,
     Eigen::VectorXd& g,
     double& stp,
-    const Eigen::VectorXd& d,
+    const Eigen::VectorXd& s,
     const Eigen::VectorXd& xp,
     const Eigen::VectorXd& gp,
     const double stpmin,
     const double stpmax,
     const callback_data_t& cd,
-    const lbfgs_parameter& param
+    const lbfgs_parameter_t& param
 ) {
-    int iter_num = 0;
-    bool touched = false; // 参看迭代进度
+    int count = 0;
+    bool brackt = false, touched = false;
+    double finit, dginit, dgtest, dstest;
+    double mu = 0.0, nu = stpmax;
+
+    /* Check the input parameters for errors. */
     if (!(stp > 0.0)) {
-        std::cout << "stp: " << stp << std::endl;
         return LBFGSERR_INVALIDPARAMETERS;
     }
 
-    double f_k0 = f;
-    double f_k1 = f;
+    /* Compute the initial gradient in the search direction. */
+    dginit = gp.dot(s);
+    /* Make sure that s points to a descent direction. */
+    if (0.0 < dginit) {
+        return LBFGSERR_INCREASEGRADIENT;
+    }
 
-    auto S_aplha_right = param.f_dec_coeff * gp.dot(d); // c1 * d * grad
-    auto C_alpha_right = param.s_curv_coeff * gp.dot(d); // c2* d * grad
+    /* The initial value of the cost function. */
+    finit = f;
+    dgtest = param.f_dec_coeff * dginit;
+    dstest = param.s_curv_coeff * dginit;
 
-    double left = 0.0, right = stpmax;
     while (true) {
-        x = xp + stp * d; // 步进进行线搜索 stp对应wolfe条件中的alpha
-        //            std::cout<<"xp: "<<xp<<" stp * d: "<<stp * d<<std::endl;
-        //            std::cout<<" stp: "<<stp<<std::endl;
-        f_k1 = cd.proc_evaluate(cd.instance, x, g); // 评估步进后的梯度与cost function
-        iter_num++;
+        x = xp + stp * s;
 
-        if (f_k1 - f_k0 > stp * S_aplha_right) { // 充分下降条件判断失败
-            right = stp;
-        } else if (g.dot(d) < C_alpha_right) { // 曲率下降条件判定失败
-            left = stp;
-        } else {
-            f = f_k1;
-            return iter_num;
+        /* Evaluate the function and gradient values. */
+        f = cd.proc_evaluate(cd.instance, x, g);
+        ++count;
+
+        /* Test for errors. */
+        if (std::isinf(f) || std::isnan(f)) {
+            return LBFGSERR_INVALID_FUNCVAL;
         }
 
-        bool bracket = right < stpmax ? true : false; // 判断线搜索的有效性
-        if (param.max_linesearch <= iter_num) {
+        if (param.past > 0 && fabs(finit - f) / (fabs(finit) + 1.0) < param.delta / param.past) {
+            return count;
+        }
+        /* Check the Armijo condition. */
+        if (f > finit + stp * dgtest) {
+            nu = stp;
+            brackt = true;
+        } else {
+            /* Check the weak Wolfe condition. */
+            if (g.dot(s) < dstest) {
+                mu = stp;
+            } else {
+                return count;
+            }
+        }
+        if (param.max_linesearch <= count) {
+            // std::cout<< fabs(dginit)/finit<<std::endl;
+            // std::cout << fabs(finit-f)/(fabs(finit)+1.0) << std::endl;
+            /* Maximum number of iteration. */
             return LBFGSERR_MAXIMUMLINESEARCH;
         }
-        if (bracket && (right - left) < param.machine_prec * right) {
+        if (brackt && (nu - mu) < param.machine_prec * nu) {
+            /* Relative interval width is at least machine_prec. */
             return LBFGSERR_WIDTHTOOSMALL;
         }
 
-        if (right < stpmax) {
-            stp = 0.5 * (left + right);
-            //                std::cout<<" left: "<<left<<" right: "<<right<<std::endl;
+        if (brackt) {
+            stp = 0.5 * (mu + nu);
         } else {
             stp *= 2.0;
         }
 
         if (stp < stpmin) {
+            /* The step is the minimum value. */
             return LBFGSERR_MINIMUMSTEP;
         }
         if (stp > stpmax) {
             if (touched) {
+                /* The step is the maximum value. */
                 return LBFGSERR_MAXIMUMSTEP;
             } else {
+                /* The maximum value should be tried once. */
                 touched = true;
                 stp = stpmax;
             }
@@ -229,36 +364,112 @@ inline int line_search_wolfe_condition(
 }
 
 /**
-     * LBFGS，启动！
-     * @param x
-     * @param f
-     * @param proc_evaluate
-     * @param proc_progress
-     * @param instance
-     * @param param
-     * @return
+     * Start a L-BFGS optimization.
+     * Assumptions: 1. f(x) is either C2 or C0 but piecewise C2;
+     *              2. f(x) is lower bounded;
+     *              3. f(x) has bounded level sets;
+     *              4. g(x) is either the gradient or subgradient;
+     *              5. The gradient exists at the initial guess x0.
+     * A user must implement a function compatible with ::lbfgs_evaluate_t (evaluation
+     * callback) and pass the pointer to the callback function to lbfgs_optimize() 
+     * arguments. Similarly, a user can implement a function compatible with 
+     * ::lbfgs_stepbound_t to provide an external upper bound for stepsize, and 
+     * ::lbfgs_progress_t (progress callback) to obtain the current progress 
+     * (e.g., variables, function, and gradient, etc) and to cancel the iteration 
+     * process if necessary. Implementation of the stepbound and the progress callback 
+     * is optional: a user can pass nullptr if progress notification is not necessary.
+     * 
+     *
+     *  @param  x               The vector of decision variables.
+     *                          THE INITIAL GUESS x0 SHOULD BE SET BEFORE THE CALL!
+     *                          A client program can receive decision variables 
+     *                          through this vector, at which the cost and its 
+     *                          gradient are queried during minimization.
+     *  @param  f               The ref to the variable that receives the final
+     *                          value of the cost function for the variables.
+     *  @param  proc_evaluate   The callback function to provide function f(x) and
+     *                          gradient g(x) evaluations given a current values of
+     *                          variables x. A client program must implement a
+     *                          callback function compatible with lbfgs_evaluate_t 
+     *                          and pass the pointer to the callback function.
+     *  @param  proc_stepbound  The callback function to provide values of the
+     *                          upperbound of the stepsize to search in, provided
+     *                          with the beginning values of variables before the 
+     *                          line search, and the current step vector (can be 
+     *                          negative gradient). A client program can implement
+     *                          this function for more efficient linesearch. If it is
+     *                          not used, just set it nullptr.
+     *  @param  proc_progress   The callback function to receive the progress
+     *                          (the number of iterations, the current value of
+     *                          the cost function) of the minimization
+     *                          process. This argument can be set to nullptr if
+     *                          a progress report is unnecessary.
+     *  @param  instance        A user data pointer for client programs. The callback
+     *                          functions will receive the value of this argument.
+     *  @param  param           The parameters for L-BFGS optimization.
+     *  @retval int             The status code. This function returns a nonnegative 
+     *                          integer if the minimization process terminates without 
+     *                          an error. A negative integer indicates an error.
      */
 inline int lbfgs_optimize(
     Eigen::VectorXd& x,
     double& f,
     lbfgs_evaluate_t proc_evaluate,
+    lbfgs_stepbound_t proc_stepbound,
     lbfgs_progress_t proc_progress,
     void* instance,
-    const lbfgs_parameter& param
+    const lbfgs_parameter_t& param
 ) {
     int ret, i, j, k, ls, end, bound;
     double step, step_min, step_max, fx, ys, yy;
     double gnorm_inf, xnorm_inf, beta, rate, cau;
 
-    // 近似逆hessian矩阵的修正次数与问题的复杂度 时间复杂度为O(mu)
     const int n = x.size();
     const int m = param.mem_size;
-    /* 准备中间变量 */
-    Eigen::VectorXd xp(n); // 分别记录xk+1,xk,gk,gk+1
+
+    /* Check the input parameters for errors. */
+    if (n <= 0) {
+        return LBFGSERR_INVALID_N;
+    }
+    if (m <= 0) {
+        return LBFGSERR_INVALID_MEMSIZE;
+    }
+    if (param.g_epsilon < 0.0) {
+        return LBFGSERR_INVALID_GEPSILON;
+    }
+    if (param.past < 0) {
+        return LBFGSERR_INVALID_TESTPERIOD;
+    }
+    if (param.delta < 0.0) {
+        return LBFGSERR_INVALID_DELTA;
+    }
+    if (param.min_step < 0.0) {
+        return LBFGSERR_INVALID_MINSTEP;
+    }
+    if (param.max_step < param.min_step) {
+        return LBFGSERR_INVALID_MAXSTEP;
+    }
+    if (!(param.f_dec_coeff > 0.0 && param.f_dec_coeff < 1.0)) {
+        return LBFGSERR_INVALID_FDECCOEFF;
+    }
+    if (!(param.s_curv_coeff < 1.0 && param.s_curv_coeff > param.f_dec_coeff)) {
+        return LBFGSERR_INVALID_SCURVCOEFF;
+    }
+    if (!(param.machine_prec > 0.0)) {
+        return LBFGSERR_INVALID_MACHINEPREC;
+    }
+    if (param.max_linesearch <= 0) {
+        return LBFGSERR_INVALID_MAXLINESEARCH;
+    }
+
+    /* Prepare intermediate variables. */
+    Eigen::VectorXd xp(n);
     Eigen::VectorXd g(n);
     Eigen::VectorXd gp(n);
     Eigen::VectorXd d(n);
     Eigen::VectorXd pf(std::max(1, param.past));
+
+    /* Initialize the limited memory. */
     Eigen::VectorXd lm_alpha = Eigen::VectorXd::Zero(m);
     Eigen::MatrixXd lm_s = Eigen::MatrixXd::Zero(n, m);
     Eigen::MatrixXd lm_y = Eigen::MatrixXd::Zero(n, m);
@@ -268,17 +479,34 @@ inline int lbfgs_optimize(
     callback_data_t cd;
     cd.instance = instance;
     cd.proc_evaluate = proc_evaluate;
+    cd.proc_stepbound = proc_stepbound;
     cd.proc_progress = proc_progress;
-    fx = cd.proc_evaluate(cd.instance, x, g); // get梯度和损失函数值
+
+    /* Evaluate the function value and its gradient. */
+    fx = cd.proc_evaluate(cd.instance, x, g);
+
+    /* Store the initial value of the cost function. */
     pf(0) = fx;
-    d = -g; // 搜索方向，我们假定初始的海森矩阵是I矩阵
-    gnorm_inf = g.cwiseAbs().maxCoeff(); // 得到x和g的无穷范数
+
+    /*
+        Compute the direction;
+        we assume the initial hessian matrix H_0 as the identity matrix.
+        */
+    d = -g;
+
+    /*
+        Make sure that the initial variables are not a stationary point.
+        */
+    gnorm_inf = g.cwiseAbs().maxCoeff();
     xnorm_inf = x.cwiseAbs().maxCoeff();
-    if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon) /// 梯度判断条件
-    {
+
+    if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon) {
         /* The initial guess is already a stationary point. */
         ret = LBFGS_CONVERGENCE;
     } else {
+        /* 
+            Compute the initial step:
+            */
         step = 1.0 / d.norm();
 
         k = 1;
@@ -286,34 +514,54 @@ inline int lbfgs_optimize(
         bound = 0;
 
         while (true) {
-            //                std::cout<<" lbfgs_optimize: "<<std::endl;
+            /* Store the current position and gradient vectors. */
             xp = x;
             gp = g;
 
-            step_max = param.max_step;
+            /* If the step bound can be provied dynamically, then apply it. */
             step_min = param.min_step;
-            ls = line_search_wolfe_condition(
-                x,
-                fx,
-                g,
-                step,
-                d,
-                xp,
-                gp,
-                step_min,
-                step_max,
-                cd,
-                param
-            ); // 注意线搜索时x,g就已经得到了更新
+            step_max = param.max_step;
+            if (cd.proc_stepbound) {
+                step_max = cd.proc_stepbound(cd.instance, xp, d);
+                step_max = step_max < param.max_step ? step_max : param.max_step;
+                step = step < step_max ? step : 0.5 * step_max;
+            }
 
-            if (ls < 0) { // 异常的线搜索处理情况，直接返回异常
+            /* Search for an optimal step. */
+            ls = line_search_lewisoverton(x, fx, g, step, d, xp, gp, step_min, step_max, cd, param);
+
+            // int idx = 1;
+            // step = 1.0;
+            // if(d.norm()>1.0){
+            //         d = d.normalized().eval()*1.0;
+            // }
+            // while(1){
+            //     // std::cout<<"step * d"<<(step * d).transpose()<<std::endl;
+            //     x = xp + step * d;
+            //     /* Evaluate the function and gradient values. */
+            //     double f = cd.proc_evaluate(cd.instance, x, g);
+            //     if(g.norm()>1.0){
+            //         g = g.normalized().eval()*1.0;
+            //     }
+            //     std::cout<<"fx: "<<fx<<"  f: "<<f<<"step: "<<step<<std::endl;
+            //     if(f < fx || step <= step_min){
+            //         fx = f;
+            //         break;
+            //     }
+
+            //     step  = 1.0 / (++idx);
+            // }
+            // ls  = 1;
+
+            if (ls < 0) {
+                /* Revert to the previous point. */
                 x = xp;
                 g = gp;
                 ret = ls;
-                //std::cout << "d: " << d << std::endl;
                 break;
             }
 
+            /* Report the progress. */
             if (cd.proc_progress) {
                 if (cd.proc_progress(cd.instance, x, g, fx, step, k, ls)) {
                     ret = LBFGS_CANCELED;
@@ -321,88 +569,134 @@ inline int lbfgs_optimize(
                 }
             }
 
-            // 收敛条件判断
+            /*
+                Convergence test.
+                The criterion is given by the following formula:
+                ||g(x)||_inf / max(1, ||x||_inf) < g_epsilon
+                */
             gnorm_inf = g.cwiseAbs().maxCoeff();
             xnorm_inf = x.cwiseAbs().maxCoeff();
-
-            //                std::cout<<"gnorm: "<<gnorm_inf / std::max(1.0, xnorm_inf)<<" gnorm_inf: "<<gnorm_inf <<" xnorm_inf: "<<xnorm_inf<<std::endl;
             if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon) {
                 /* Convergence. */
                 ret = LBFGS_CONVERGENCE;
                 break;
             }
 
-            if (0 < param.past) // 只保留过去past个数字用于计算非光滑条件下的收敛条件
-            {
-                if (param.past <= k) // 注意如果迭代次数，也就是有效数据小于past的话不进行收敛性判断
-                {
+            /*
+                Test for stopping criterion.
+                The criterion is given by the following formula:
+                |f(past_x) - f(x)| / max(1, |f(x)|) < \delta.
+                */
+            if (0 < param.past) {
+                /* We don't test the stopping criterion while k < past. */
+                if (param.past <= k) {
+                    /* The stopping criterion. */
                     rate = std::fabs(pf(k % param.past) - fx) / std::max(1.0, std::fabs(fx));
 
-                    if (rate < param.delta) { // 收敛性判断
+                    if (rate < param.delta) {
                         ret = LBFGS_STOP;
                         break;
                     }
                 }
+
+                /* Store the current value of the cost function. */
                 pf(k % param.past) = fx;
             }
-            if (param.max_iterations != 0 && param.max_iterations <= k) // TODO 最easy的方法
-            { // 达到了最大收敛次数
+
+            if (param.max_iterations != 0 && param.max_iterations <= k) {
+                /* Maximum number of iterations. */
                 ret = LBFGSERR_MAXIMUMITERATION;
                 break;
             }
+
+            /* Count the iteration number. */
             ++k;
 
-            lm_s.col(end) = x - xp; // s_{k+1} = x_{k+1} - x_{k} = \step * d_{k}. cost变化
-            lm_y.col(end) = g - gp; // y_{k+1} = g_{k+1} - g_{k}.  cost梯度变化
+            /*
+                Update vectors s and y:
+                s_{k+1} = x_{k+1} - x_{k} = \step * d_{k}.
+                y_{k+1} = g_{k+1} - g_{k}.
+                */
+            lm_s.col(end) = x - xp;
+            lm_y.col(end) = g - gp;
 
-            ys = lm_y.col(end).dot(lm_s.col(end)); // 1/rho
+            /*
+                Compute scalars ys and yy:
+                ys = y^t \cdot s = 1 / \rho.
+                yy = y^t \cdot y.
+                Notice that yy is used for scaling the hessian matrix H_0 (Cholesky factor).
+                */
+            ys = lm_y.col(end).dot(lm_s.col(end));
             yy = lm_y.col(end).squaredNorm();
             lm_ys(end) = ys;
 
+            /* Compute the negative of gradients. */
             d = -g;
 
-            // 进行cautious-LBFGS更新，更新条件：delta_{g}.dot(delta_{x}) >  cautious_factor * delta_{x}^2 * gp.norm()
+            /* 
+                Only cautious update is performed here as long as 
+                (y^t \cdot s) / ||s_{k+1}||^2 > \epsilon * ||g_{k}||^\alpha,
+                where \epsilon is the cautious factor and a proposed value 
+                for \alpha is 1.
+                This is not for enforcing the PD of the approxomated Hessian 
+                since ys > 0 is already ensured by the weak Wolfe condition. 
+                This is to ensure the global convergence as described in:
+                Dong-Hui Li and Masao Fukushima. On the global convergence of 
+                the BFGS method for nonconvex unconstrained optimization problems. 
+                SIAM Journal on Optimization, Vol 11, No 4, pp. 1054-1064, 2011.
+                */
             cau = lm_s.col(end).squaredNorm() * gp.norm() * param.cautious_factor;
-            if (ys > cau) { // 进行LBFGS的步长更新
+
+            if (ys > cau) {
+                /*
+                    Recursive formula to compute dir = -(H \cdot g).
+                    This is described in page 779 of:
+                    Jorge Nocedal.
+                    Updating Quasi-Newton Matrices with Limited Storage.
+                    Mathematics of Computation, Vol. 35, No. 151,
+                    pp. 773--782, 1980.
+                    */
                 ++bound;
-                // m：窗口长度
                 bound = m < bound ? m : bound;
                 end = (end + 1) % m;
 
                 j = end;
-
                 for (i = 0; i < bound; ++i) {
-                    // k-1, k-2, ..., k-m
-                    j = (j + m - 1) % m;
+                    j = (j + m - 1) % m; /* if (--j == -1) j = m-1; */
+                    /* \alpha_{j} = \rho_{j} s^{t}_{j} \cdot q_{k+1}. */
                     lm_alpha(j) = lm_s.col(j).dot(d) / lm_ys(j);
+                    /* q_{i} = q_{i+1} - \alpha_{i} y_{i}. */
                     d += (-lm_alpha(j)) * lm_y.col(j);
                 }
 
-                d *= ys / yy; // d = d/rho * yy
+                d *= ys / yy;
 
                 for (i = 0; i < bound; ++i) {
+                    /* \beta_{j} = \rho_{j} y^t_{j} \cdot \gamm_{i}. */
                     beta = lm_y.col(j).dot(d) / lm_ys(j);
+                    /* \gamm_{i+1} = \gamm_{i} + (\alpha_{j} - \beta_{j}) s_{j}. */
                     d += (lm_alpha(j) - beta) * lm_s.col(j);
-                    // k-m, k-m-1, ..., k-1 (注意与上面的区别)
-                    j = (j + 1) % m;
+                    j = (j + 1) % m; /* if (++j == m) j = 0; */
                 }
             }
+
             /* The search direction d is ready. We try step = 1 first. */
-            step = 2;
+            step = 1.0;
         }
     }
 
     /* Return the final value of the cost function. */
     f = fx;
+
     return ret;
 }
 
 /**
-     * 输入的错误码来输出错误信息
-     * @param err
-     * @return
+     * Get string description of an lbfgs_optimize() return code.
+     *
+     *  @param err          A value returned by lbfgs_optimize().
      */
-inline const char* lbfgs_stderr(const int err) {
+inline const char* lbfgs_strerror(const int err) {
     switch (err) {
         case LBFGS_CONVERGENCE:
             return "Success: reached convergence (g_epsilon).";
@@ -479,3 +773,5 @@ inline const char* lbfgs_stderr(const int err) {
 }
 
 } // namespace lbfgs
+
+#endif
