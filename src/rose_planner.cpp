@@ -1,17 +1,17 @@
 #include "rose_planner.hpp"
-#include "a*.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "parameters.hpp"
-#include "path_search.hpp"
+#include "path_search/a*.hpp"
 #include "replan_fsm.hpp"
 #include "rose_map/rose_map.hpp"
-#include "trajectory_opt.hpp"
-#include "trajectory_sampler.hpp"
+#include "trajectory_optimize/trajectory_opt.hpp"
+#include "trajectory_optimize/trajectory_sampler.hpp"
+#include <angles.h>
+#include <mpc_control/acado_mpc.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-
 namespace rose_planner {
 struct RosePlanner::Impl {
 public:
@@ -24,6 +24,7 @@ public:
         rose_map_ = std::make_shared<rose_map::RoseMap>(node);
         path_search_ = SearchType::create(rose_map_, parameters_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
+        mpc_ = AcadoMpc::create(parameters_);
         target_frame_ = node.declare_parameter<std::string>("target_frame", "");
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
         odometry_sub_ = node.create_subscription<nav_msgs::msg::Odometry>(
@@ -47,10 +48,15 @@ public:
 
         raw_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("raw_path", 10);
         opt_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("opt_path", 10);
-
+        predict_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("predict_path", 10);
+        cmd_vel_pub_ = node.create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
         timer_ = node.create_wall_timer(
             std::chrono::milliseconds(100),
             std::bind(&RosePlanner::Impl::timerCallback, this)
+        );
+        control_timer_ = node.create_wall_timer(
+            std::chrono::milliseconds(10),
+            std::bind(&RosePlanner::Impl::mpcSolverCallback, this)
         );
 
         replan_fsm_.state_ = ReplanFSM::INIT;
@@ -126,6 +132,179 @@ public:
             }
         }
     }
+    double orientationToYaw(const geometry_msgs::msg::Quaternion& q) noexcept {
+        // Get armor yaw
+        tf2::Quaternion tf_q;
+        tf2::fromMsg(q, tf_q);
+        double roll, pitch, yaw;
+        tf2::Matrix3x3(tf_q).getRPY(roll, pitch, yaw);
+        // Make yaw change continuous (-pi~pi to -inf~inf)
+        yaw = last_yaw_ + angles::shortest_angular_distance(last_yaw_, yaw);
+        last_yaw_ = yaw;
+        return yaw;
+    }
+    std::vector<double>
+    update_states(std::vector<double> state, double vx_cmd, double vy_cmd, double w_cmd) {
+        // based on kinematic model
+        double x0 = state[0];
+        double y0 = state[1];
+        double q0 = state[2];
+        double vx = vx_cmd;
+        double vy = vy_cmd;
+        double w0 = w_cmd;
+
+        double x1 = x0 + (vx * cos(q0) - vy * sin(q0)) * Ts;
+        double y1 = y0 + (vx * sin(q0) + vy * cos(q0)) * Ts;
+
+        double q1 = q0 + w0 * Ts;
+        return { x1, y1, q1 };
+    }
+    std::vector<double> motion_prediction(
+        const std::vector<double>& cur_states,
+        const std::vector<std::vector<double>>& prev_u
+    ) {
+        std::vector<double> old_vx_cmd = prev_u[0];
+        std::vector<double> old_vy_cmd = prev_u[1];
+        std::vector<double> old_w_cmd = prev_u[2];
+
+        std::vector<std::vector<double>> predicted_states;
+        predicted_states.push_back(cur_states);
+
+        for (int i = 0; i < N; i++) {
+            std::vector<double> cur_state = predicted_states[i];
+            std::vector<double> next_state =
+                update_states(cur_state, old_vx_cmd[i], old_vy_cmd[i], old_w_cmd[i]);
+            predicted_states.push_back(next_state);
+        }
+
+        std::vector<double> result;
+        for (int i = 0; i < (ACADO_N + 1); ++i) {
+            for (int j = 0; j < NX; ++j) {
+                result.push_back(predicted_states[i][j]);
+            }
+        }
+        return result;
+    }
+
+    void mpcSolverCallback() {
+        if (replan_fsm_.state_ != ReplanFSM::REPLAN) {
+            return;
+        }
+
+        const double path_dt = parameters_.path_search_params_.resampler.dt;
+        const double Ts_local = Ts; // 0.1s
+        const int N_horizon = N;
+
+        std::vector<Eigen::Vector2d> use_path = current_path_;
+        // Eigen::Vector2d start_v(
+        //     current_odom_.twist.twist.linear.x,
+        //     current_odom_.twist.twist.linear.y
+        // );
+
+        // auto traj = sampleTrajectoryTrapezoid(
+        //     current_path_,
+        //     parameters_.path_search_params_.resampler.acc,
+        //     parameters_.path_search_params_.resampler.max_vel,
+        //     path_dt,
+        //     start_v
+        // );
+
+        // use_path.clear();
+        // for (const auto& st: traj) {
+        //     use_path.push_back(st.p.cast<double>());
+        // }
+
+        double traj_duration = (use_path.size() - 1) * path_dt;
+
+        Eigen::Vector2d robot_pos(current_pose_.position.x, current_pose_.position.y);
+        double current_yaw = orientationToYaw(current_pose_.orientation);
+
+        int closest_index = 0;
+        double min_dist = 1e9;
+        for (int i = 0; i < (int)use_path.size(); ++i) {
+            double dist = (use_path[i] - robot_pos).norm();
+            if (dist < min_dist) {
+                min_dist = dist;
+                closest_index = i;
+            }
+        }
+        double t0 = closest_index * path_dt;
+
+        auto wrap = [&](double a) {
+            while (a > M_PI)
+                a -= 2 * M_PI;
+            while (a < -M_PI)
+                a += 2 * M_PI;
+            return a;
+        };
+
+        auto samplePathPos = [&](double t) {
+            double s = t / path_dt;
+            int i = std::clamp((int)floor(s), 0, (int)use_path.size() - 2);
+            double r = s - i;
+            return use_path[i] * (1 - r) + use_path[i + 1] * r;
+        };
+
+        auto samplePathYaw = [&](double t) {
+            auto p1 = samplePathPos(t);
+            auto p2 = samplePathPos(std::min(t + Ts_local, traj_duration));
+            return atan2(p2.y() - p1.y(), p2.x() - p1.x());
+        };
+
+        auto sampleYawRate = [&](double t) {
+            double y1 = samplePathYaw(t);
+            double y2 = samplePathYaw(std::min(t + Ts_local, traj_duration));
+            return wrap(y2 - y1) / Ts_local;
+        };
+        std::vector<double> ref_states;
+        ref_states.reserve(6 * N_horizon);
+
+        double t_cur = t0;
+        int path_idx = closest_index;
+
+        for (int i = 0; i < N_horizon; ++i) {
+            if (t_cur > traj_duration)
+                t_cur = traj_duration;
+
+            Eigen::Vector2d pos = samplePathPos(t_cur);
+            double yaw = samplePathYaw(t_cur);
+            double speed = 2.5;
+
+            Eigen::Vector2d vel(speed * cos(yaw), speed * sin(yaw));
+            double yawdot = sampleYawRate(t_cur);
+
+            ref_states.push_back(pos.x());
+            ref_states.push_back(pos.y());
+            ref_states.push_back(yaw);
+            ref_states.push_back(vel.x());
+            ref_states.push_back(vel.y());
+            ref_states.push_back(yawdot);
+
+            t_cur += Ts_local;
+            path_idx++;
+        }
+
+        std::vector<double> cur_vec = { robot_pos.x(), robot_pos.y(), current_yaw };
+        auto predicted = motion_prediction(cur_vec, mpc_->control_output_);
+
+        mpc_->control_output_ = mpc_->solve(predicted, ref_states);
+        geometry_msgs::msg::Twist cmd;
+        cmd.linear.x = mpc_->control_output_[0][0];
+        cmd.linear.y = mpc_->control_output_[1][0];
+        cmd.angular.z = mpc_->control_output_[2][0];
+        cmd_vel_pub_->publish(cmd);
+        nav_msgs::msg::Path  predict_path;
+        predict_path.header.frame_id = target_frame_;
+        predict_path.header.stamp = rclcpp::Clock().now();
+
+        geometry_msgs::msg::PoseStamped pose_msg;
+        for (int i = 0; i < ACADO_N; ++i) {
+            pose_msg.pose.position.x = acadoVariables.x[NX * i + 0];
+            pose_msg.pose.position.y = acadoVariables.x[NX * i + 1];
+            predict_path.poses.push_back(pose_msg);
+        }
+        predict_path_pub_->publish(predict_path);
+    }
 
     std::vector<int> checkSafePath(const std::vector<Eigen::Vector2d>& path) {
         std::vector<int> unsafe_points;
@@ -144,7 +323,7 @@ public:
     void localReplan(const std::vector<int>& unsafe_points, const Eigen::Vector2f& goal_w) {
         if (current_raw_path_.empty())
             return;
-        int N = (int)current_raw_path_.size();
+        int Num = (int)current_raw_path_.size();
         int local_end_idx;
         Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
         if (unsafe_points.empty()) {
@@ -152,7 +331,7 @@ public:
         } else {
             local_end_idx = unsafe_points.back();
         }
-        local_end_idx = std::clamp(local_end_idx, 0, N - 1);
+        local_end_idx = std::clamp(local_end_idx, 0, Num - 1);
 
         std::vector<Eigen::Vector2d> path_after(
             current_raw_path_.begin() + local_end_idx + 1,
@@ -202,8 +381,8 @@ public:
         if (current_path.empty())
             return -1;
 
-        constexpr double TARGET_DIST = 1.5; // 目标 1.5m
-        constexpr double TOLERANCE = 0.3; // 允许误差 ±0.3m
+        constexpr double TARGET_DIST = 2.0; // 目标 1.5m
+        constexpr double TOLERANCE = 0.5; // 允许误差 ±0.3m
         constexpr double TARGET_DIST2 = TARGET_DIST * TARGET_DIST;
 
         int best_index = 0;
@@ -298,6 +477,7 @@ public:
     }
 
     void resampleAndOpt(const std::vector<Eigen::Vector2d>& path) {
+        start_time_ = node_->now();
         nav_msgs::msg::Path raw_path_msg;
         raw_path_msg.header.stamp = node_->now();
         raw_path_msg.header.frame_id = target_frame_;
@@ -520,20 +700,24 @@ private:
     TrajectoryOpt::Ptr traj_opt_;
 
     geometry_msgs::msg::Pose current_pose_;
+    double last_yaw_;
     nav_msgs::msg::Odometry current_odom_;
     geometry_msgs::msg::PoseStamped current_goal_;
-
+    rclcpp::Time start_time_;
     ReplanFSM replan_fsm_;
-
+    AcadoMpc::Ptr mpc_;
     std::vector<Eigen::Vector2d> current_path_;
     std::vector<Eigen::Vector2d> current_raw_path_;
     std::string target_frame_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr raw_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr opt_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr predict_path_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
 };

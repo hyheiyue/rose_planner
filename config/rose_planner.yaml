@@ -10,12 +10,17 @@ rose_planner_node:
         obstacle_penalty_weight: 10.0
         heuristic_weight: 1.0
       resampler:
-        max_vel: 3.0
+        max_vel: 4.0
         acc: 2.0
         dt: 0.1
     trajectory_opt:
       smooth_weight: 1.0
       obstacle_weight: 0.7
+    mpc_control:
+      weight_p: 50.0
+      weight_yaw: 200.0
+      weight_v: 5.0
+      weight_w: 0.01
     rose_map:
       log_time: true
       pointcloud_topic: /cloud_registered

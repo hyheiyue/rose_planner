@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
-#include <rclcpp/node.hpp>
+namespace rclcpp {
+class Node;
+}
 namespace rose_planner {
 class RosePlanner {
 public:

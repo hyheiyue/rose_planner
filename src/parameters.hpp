@@ -8,6 +8,7 @@ public:
     void load(rclcpp::Node& node) {
         path_search_params_.load(node);
         opt_params.load(node);
+        mpc_params.load(node);
         std::vector<double> robot_size_vec =
             node.declare_parameter("robot_size", std::vector<double> { 0.5, 0.5 });
         robot_size = Eigen::Vector2f(robot_size_vec[0], robot_size_vec[1]);
@@ -21,11 +22,20 @@ public:
         double obstacle_weight = 1.0;
         void load(rclcpp::Node& node) {
             smooth_weight =
-                node.declare_parameter<float>("trajectory_opt.smooth_weight", smooth_weight);
+                node.declare_parameter<double>("trajectory_opt.smooth_weight", smooth_weight);
             obstacle_weight =
-                node.declare_parameter<float>("trajectory_opt.obstacle_weight", obstacle_weight);
+                node.declare_parameter<double>("trajectory_opt.obstacle_weight", obstacle_weight);
         }
     } opt_params;
+    struct MpcParams {
+        double weight_p, weight_yaw, weight_v, weight_w;
+        void load(rclcpp::Node& node) {
+            weight_p = node.declare_parameter<double>("mpc_control.weight_p", weight_p);
+            weight_yaw = node.declare_parameter<double>("mpc_control.weight_yaw", weight_yaw);
+            weight_v = node.declare_parameter<double>("mpc_control.weight_v", weight_v);
+            weight_w = node.declare_parameter<double>("mpc_control.weight_w", weight_w);
+        }
+    } mpc_params;
     struct PathSearchParams {
         struct AStar {
             float clearance_weight = 5.0f;

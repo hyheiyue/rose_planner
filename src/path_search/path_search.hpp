@@ -1,5 +1,5 @@
 #pragma once
-#include "parameters.hpp"
+#include "../parameters.hpp"
 #include "rose_map/rose_map.hpp"
 #include <cmath>
 #include <cstdint>

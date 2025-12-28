@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
+cmake_policy(SET CMP0111 NEW)
 project(rose_planner)
-
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/cmake)
 ## use c++20
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,15 +11,6 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 ## export compile commands for clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-# set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON) 
-# add_compile_options(
-#     -O3              
-#     -march=native     
-#     -mtune=native
-#     -ffast-math       
-#     -funroll-loops  
-# )
-# add_link_options(-O3 -flto)  
 set(CMAKE_BUILD_TYPE "Release")
 
 file(GLOB_RECURSE SOURCE src/*.cpp 3rdparty/*.c 3rdparty/*.cpp)
@@ -37,6 +29,10 @@ find_package(TBB REQUIRED)
 find_package(rose_map REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
+find_package(ACADO REQUIRED)
+add_library(ACADO STATIC IMPORTED)
+include_directories(sim_diff_drive222)
+set_target_properties(ACADO PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/sim_diff_drive222/libacado_exported_rti.a")
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -45,6 +41,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     src
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${OpenCV_INCLUDE_DIRS}
+    ${ACADO_INCLUDE_DIR}
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -52,6 +49,8 @@ target_link_libraries(${PROJECT_NAME}
     yaml-cpp
     TBB::tbb
     ${CERES_LIBRARIES}
+    ${ACADO_SHARED_LIBRARIES}
+    ACADO
 )
 ament_target_dependencies(${PROJECT_NAME}
     rclcpp

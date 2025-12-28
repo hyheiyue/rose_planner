@@ -1,8 +1,8 @@
 #pragma once
-#include "common.hpp"
+#include "../common.hpp"
+#include "../parameters.hpp"
 #include "cubic_spline.hpp"
 #include "lbfgs.hpp"
-#include "parameters.hpp"
 #include "rose_map/rose_map.hpp"
 
 #include <algorithm>
@@ -79,12 +79,12 @@ public:
                 // std::cout << "[Smooth Optimize] Optimization Success: "
                 //           << lbfgs::lbfgs_strerror(ret) << std::endl;
             } else if (ret == 0) {
-                std::cout << "[Smooth Optimize] Optimization STOP: " << lbfgs::lbfgs_strerror(ret)
-                          << std::endl;
+                // std::cout << "[Smooth Optimize] Optimization STOP: " << lbfgs::lbfgs_strerror(ret)
+                //           << std::endl;
             } else {
-                std::cout
-                    << "[Smooth Optimize] Optimization reaches the maximum number of evaluations: "
-                    << lbfgs::lbfgs_strerror(ret) << std::endl;
+                // std::cout
+                //     << "[Smooth Optimize] Optimization reaches the maximum number of evaluations: "
+                //     << lbfgs::lbfgs_strerror(ret) << std::endl;
             }
 
             for (int i = 0; i < ctx_.pieceNum - 1; i++) {
