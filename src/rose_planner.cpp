@@ -113,7 +113,9 @@ public:
                     break;
                 }
 
-                auto unsafe_points = checkSafePath(current_path_);
+                auto unsafe_points = checkSafePath(
+                    current_traj_.toPointVector(parameters_.path_search_params_.resampler.dt)
+                );
 
                 localReplan(unsafe_points, goal_pos);
 
@@ -190,88 +192,44 @@ public:
         if (replan_fsm_.state_ != ReplanFSM::REPLAN) {
             return;
         }
-
-        const double path_dt = parameters_.path_search_params_.resampler.dt;
         const double Ts_local = Ts; // 0.1s
         const int N_horizon = N;
+        const double totalDur = current_traj_.getTotalDuration();
 
-        std::vector<Eigen::Vector2d> use_path = current_path_;
-        // Eigen::Vector2d start_v(
-        //     current_odom_.twist.twist.linear.x,
-        //     current_odom_.twist.twist.linear.y
-        // );
-
-        // auto traj = sampleTrajectoryTrapezoid(
-        //     current_path_,
-        //     parameters_.path_search_params_.resampler.acc,
-        //     parameters_.path_search_params_.resampler.max_vel,
-        //     path_dt,
-        //     start_v
-        // );
-
-        // use_path.clear();
-        // for (const auto& st: traj) {
-        //     use_path.push_back(st.p.cast<double>());
-        // }
-
-        double traj_duration = (use_path.size() - 1) * path_dt;
+        std::vector<Eigen::Vector2d> pts = current_traj_.toPointVector(Ts_local);
+        if (pts.size() < 2) {
+            return;
+        }
 
         Eigen::Vector2d robot_pos(current_pose_.position.x, current_pose_.position.y);
         double current_yaw = orientationToYaw(current_pose_.orientation);
 
         int closest_index = 0;
         double min_dist = 1e9;
-        for (int i = 0; i < (int)use_path.size(); ++i) {
-            double dist = (use_path[i] - robot_pos).norm();
+        for (int i = 0; i < (int)pts.size(); ++i) {
+            double dist = (pts[i] - robot_pos).norm();
             if (dist < min_dist) {
                 min_dist = dist;
                 closest_index = i;
             }
         }
-        double t0 = closest_index * path_dt;
+        double t0 = closest_index * Ts_local;
+        t0 = std::clamp(t0, 0.0, totalDur);
 
-        auto wrap = [&](double a) {
-            while (a > M_PI)
-                a -= 2 * M_PI;
-            while (a < -M_PI)
-                a += 2 * M_PI;
-            return a;
-        };
-
-        auto samplePathPos = [&](double t) {
-            double s = t / path_dt;
-            int i = std::clamp((int)floor(s), 0, (int)use_path.size() - 2);
-            double r = s - i;
-            return use_path[i] * (1 - r) + use_path[i + 1] * r;
-        };
-
-        auto samplePathYaw = [&](double t) {
-            auto p1 = samplePathPos(t);
-            auto p2 = samplePathPos(std::min(t + Ts_local, traj_duration));
-            return atan2(p2.y() - p1.y(), p2.x() - p1.x());
-        };
-
-        auto sampleYawRate = [&](double t) {
-            double y1 = samplePathYaw(t);
-            double y2 = samplePathYaw(std::min(t + Ts_local, traj_duration));
-            return wrap(y2 - y1) / Ts_local;
-        };
         std::vector<double> ref_states;
         ref_states.reserve(6 * N_horizon);
-
         double t_cur = t0;
-        int path_idx = closest_index;
-
         for (int i = 0; i < N_horizon; ++i) {
-            if (t_cur > traj_duration)
-                t_cur = traj_duration;
+            if (t_cur > totalDur)
+                t_cur = totalDur;
 
-            Eigen::Vector2d pos = samplePathPos(t_cur);
-            double yaw = samplePathYaw(t_cur);
-            double speed = 2.5;
-
-            Eigen::Vector2d vel(speed * cos(yaw), speed * sin(yaw));
-            double yawdot = sampleYawRate(t_cur);
+            Eigen::VectorXd pos = current_traj_.getPos(t_cur);
+            Eigen::VectorXd vel = current_traj_.getVel(t_cur);
+            Eigen::VectorXd acc = current_traj_.getAcc(t_cur);
+            double yaw = atan2(vel.y(), vel.x());
+            yaw = angles::shortest_angular_distance(current_yaw, yaw) + current_yaw;
+            double yawdot = (vel.x() * acc.y() - vel.y() * acc.x())
+                / (vel.x() * vel.x() + vel.y() * vel.y() + 1e-6);
 
             ref_states.push_back(pos.x());
             ref_states.push_back(pos.y());
@@ -281,19 +239,21 @@ public:
             ref_states.push_back(yawdot);
 
             t_cur += Ts_local;
-            path_idx++;
+            t_cur = std::clamp(t_cur, 0.0, totalDur);
         }
 
         std::vector<double> cur_vec = { robot_pos.x(), robot_pos.y(), current_yaw };
         auto predicted = motion_prediction(cur_vec, mpc_->control_output_);
 
         mpc_->control_output_ = mpc_->solve(predicted, ref_states);
+
         geometry_msgs::msg::Twist cmd;
         cmd.linear.x = mpc_->control_output_[0][0];
         cmd.linear.y = mpc_->control_output_[1][0];
         cmd.angular.z = mpc_->control_output_[2][0];
         cmd_vel_pub_->publish(cmd);
-        nav_msgs::msg::Path  predict_path;
+
+        nav_msgs::msg::Path predict_path;
         predict_path.header.frame_id = target_frame_;
         predict_path.header.stamp = rclcpp::Clock().now();
 
@@ -415,7 +375,7 @@ public:
 
     void searchOnce(const Eigen::Vector2f& goal_w) {
         Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
-        current_path_.clear();
+
         current_raw_path_.clear();
 
         RCLCPP_INFO(
@@ -455,12 +415,12 @@ public:
 
             RCLCPP_INFO(
                 node_->get_logger(),
-                "Planning success | A*: %ld ms | Opt: %ld ms | Total: %ld ms | Raw: %zu pts | Opt: %zu pts",
+                "Planning success | A*: %ld ms | Opt: %ld ms | Total: %ld ms | Raw: %zu pts | Opt: %u pts",
                 search_ms,
                 opt_ms,
                 total_ms,
                 current_raw_path_.size(),
-                current_path_.size()
+                current_traj_.getPieceNum()
             );
 
         } else if (search_state == SearchState::NO_PATH) {
@@ -490,7 +450,7 @@ public:
             current_odom_.twist.twist.linear.x,
             current_odom_.twist.twist.linear.y
         );
-
+        start_v = Eigen::Vector2d::Zero();
         auto traj = sampleTrajectoryTrapezoid(
             path,
             parameters_.path_search_params_.resampler.acc,
@@ -507,7 +467,7 @@ public:
 
         traj_opt_->optimize();
         auto opt_traj = traj_opt_->getTrajectory();
-        current_path_ = opt_traj;
+        current_traj_ = opt_traj;
 
         // Publish raw path
         if (raw_path_pub_->get_subscription_count() > 0) {
@@ -534,7 +494,8 @@ public:
 
         // Publish optimized path
         if (opt_path_pub_->get_subscription_count() > 0) {
-            for (const auto& point: opt_traj) {
+            for (const auto& point:
+                 opt_traj.toPointVector(parameters_.path_search_params_.resampler.dt)) {
                 geometry_msgs::msg::PoseStamped pose_msg;
                 pose_msg.header = opt_path_msg.header;
                 pose_msg.pose.position.x = point.x();
@@ -706,7 +667,7 @@ private:
     rclcpp::Time start_time_;
     ReplanFSM replan_fsm_;
     AcadoMpc::Ptr mpc_;
-    std::vector<Eigen::Vector2d> current_path_;
+    Trajectory<3, 2> current_traj_;
     std::vector<Eigen::Vector2d> current_raw_path_;
     std::string target_frame_;
     rclcpp::TimerBase::SharedPtr timer_;

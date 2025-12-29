@@ -11,13 +11,14 @@ rose_planner_node:
         heuristic_weight: 1.0
       resampler:
         max_vel: 4.0
-        acc: 2.0
+        acc: 3.0
         dt: 0.1
     trajectory_opt:
-      smooth_weight: 1.0
-      obstacle_weight: 0.7
+      smooth_weight: 3.0
+      obstacle_weight: 500.0
+      time_weight: 2.0
     mpc_control:
-      weight_p: 50.0
+      weight_p: 500.0
       weight_yaw: 200.0
       weight_v: 5.0
       weight_w: 0.01
@@ -52,6 +53,6 @@ rose_planner_node:
         kernel_size: 3
         dilate_iter: 1
         use_static_map: true
-        static_map_path: "/home/hy/wust_nav2/src/bringup_nav/map/simulation/rmuc_2025.yaml"
+        static_map_path: "/home/hy/wust_nav2/src/bringup_nav/map/simulation/rmuc_2026.yaml"
       esdf:
         use_diagonals: true
