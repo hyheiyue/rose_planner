@@ -851,4 +851,418 @@ public:
         return tailPV;
     }
 };
+class MINCO_S3NU {
+public:
+    MINCO_S3NU() = default;
+    ~MINCO_S3NU() {
+        A.destroy();
+    }
+
+private:
+    int N;
+    Eigen::Matrix<double, 2, 3> headPVA;
+    Eigen::Matrix<double, 2, 3> tailPVA;
+    BandedSystem A;
+    Eigen::MatrixX2d b;
+    Eigen::VectorXd T1;
+    Eigen::VectorXd T2;
+    Eigen::VectorXd T3;
+    Eigen::VectorXd T4;
+    Eigen::VectorXd T5;
+
+    Eigen::DiagonalMatrix<double, 2> energyWeights;
+
+public:
+    inline void setConditions(
+        const Eigen::Matrix<double, 2, 3>& headState,
+        const Eigen::Matrix<double, 2, 3>& tailState,
+        const int& pieceNum
+    ) {
+        N = pieceNum;
+        headPVA = headState;
+        tailPVA = tailState;
+        A.create(6 * N, 6, 6);
+        b.resize(6 * N, 2);
+        T1.resize(N);
+        T2.resize(N);
+        T3.resize(N);
+        T4.resize(N);
+        T5.resize(N);
+        energyWeights = Eigen::DiagonalMatrix<double, 2>(1.0, 1.0);
+        return;
+    }
+
+    inline void setConditions(
+        const Eigen::Matrix<double, 2, 3>& headState,
+        const Eigen::Matrix<double, 2, 3>& tailState,
+        const int& pieceNum,
+        const Eigen::Vector2d energyWt
+    ) {
+        N = pieceNum;
+        headPVA = headState;
+        tailPVA = tailState;
+        A.create(6 * N, 6, 6);
+        b.resize(6 * N, 2);
+        T1.resize(N);
+        T2.resize(N);
+        T3.resize(N);
+        T4.resize(N);
+        T5.resize(N);
+        energyWeights = Eigen::DiagonalMatrix<double, 2>(energyWt.x(), energyWt.y());
+        return;
+    }
+
+    inline void setHConditions(const Eigen::MatrixXd& headState) {
+        headPVA = headState;
+    }
+
+    inline void setTConditions(const Eigen::MatrixXd& tailState) {
+        tailPVA = tailState;
+    }
+
+    inline void setParameters(const Eigen::MatrixXd& inPs, const Eigen::VectorXd& ts) {
+        T1 = ts;
+        T2 = T1.cwiseProduct(T1);
+        T3 = T2.cwiseProduct(T1);
+        T4 = T2.cwiseProduct(T2);
+        T5 = T4.cwiseProduct(T1);
+
+        A.reset();
+        b.setZero();
+
+        A(0, 0) = 1.0;
+        A(1, 1) = 1.0;
+        A(2, 2) = 2.0;
+        // A(3, 3) = 6.0;
+        b.row(0) = headPVA.col(0).transpose();
+        b.row(1) = headPVA.col(1).transpose();
+        b.row(2) = headPVA.col(2).transpose();
+
+        for (int i = 0; i < N - 1; i++) {
+            A(6 * i + 3, 6 * i + 3) = 6.0;
+            A(6 * i + 3, 6 * i + 4) = 24.0 * T1(i);
+            A(6 * i + 3, 6 * i + 5) = 60.0 * T2(i);
+            A(6 * i + 3, 6 * i + 9) = -6.0;
+            A(6 * i + 4, 6 * i + 4) = 24.0;
+            A(6 * i + 4, 6 * i + 5) = 120.0 * T1(i);
+            A(6 * i + 4, 6 * i + 10) = -24.0;
+            A(6 * i + 5, 6 * i) = 1.0;
+            A(6 * i + 5, 6 * i + 1) = T1(i);
+            A(6 * i + 5, 6 * i + 2) = T2(i);
+            A(6 * i + 5, 6 * i + 3) = T3(i);
+            A(6 * i + 5, 6 * i + 4) = T4(i);
+            A(6 * i + 5, 6 * i + 5) = T5(i);
+            A(6 * i + 6, 6 * i) = 1.0;
+            A(6 * i + 6, 6 * i + 1) = T1(i);
+            A(6 * i + 6, 6 * i + 2) = T2(i);
+            A(6 * i + 6, 6 * i + 3) = T3(i);
+            A(6 * i + 6, 6 * i + 4) = T4(i);
+            A(6 * i + 6, 6 * i + 5) = T5(i);
+            A(6 * i + 6, 6 * i + 6) = -1.0;
+            A(6 * i + 7, 6 * i + 1) = 1.0;
+            A(6 * i + 7, 6 * i + 2) = 2 * T1(i);
+            A(6 * i + 7, 6 * i + 3) = 3 * T2(i);
+            A(6 * i + 7, 6 * i + 4) = 4 * T3(i);
+            A(6 * i + 7, 6 * i + 5) = 5 * T4(i);
+            A(6 * i + 7, 6 * i + 7) = -1.0;
+            A(6 * i + 8, 6 * i + 2) = 2.0;
+            A(6 * i + 8, 6 * i + 3) = 6 * T1(i);
+            A(6 * i + 8, 6 * i + 4) = 12 * T2(i);
+            A(6 * i + 8, 6 * i + 5) = 20 * T3(i);
+            A(6 * i + 8, 6 * i + 8) = -2.0;
+
+            b.row(6 * i + 5) = inPs.col(i).transpose();
+        }
+
+        A(6 * N - 3, 6 * N - 6) = 1.0;
+        A(6 * N - 3, 6 * N - 5) = T1(N - 1);
+        A(6 * N - 3, 6 * N - 4) = T2(N - 1);
+        A(6 * N - 3, 6 * N - 3) = T3(N - 1);
+        A(6 * N - 3, 6 * N - 2) = T4(N - 1);
+        A(6 * N - 3, 6 * N - 1) = T5(N - 1);
+        A(6 * N - 2, 6 * N - 5) = 1.0;
+        A(6 * N - 2, 6 * N - 4) = 2 * T1(N - 1);
+        A(6 * N - 2, 6 * N - 3) = 3 * T2(N - 1);
+        A(6 * N - 2, 6 * N - 2) = 4 * T3(N - 1);
+        A(6 * N - 2, 6 * N - 1) = 5 * T4(N - 1);
+        A(6 * N - 1, 6 * N - 4) = 2;
+        A(6 * N - 1, 6 * N - 3) = 6 * T1(N - 1);
+        A(6 * N - 1, 6 * N - 2) = 12 * T2(N - 1);
+        A(6 * N - 1, 6 * N - 1) = 20 * T3(N - 1);
+
+        b.row(6 * N - 3) = tailPVA.col(0).transpose();
+        b.row(6 * N - 2) = tailPVA.col(1).transpose();
+        b.row(6 * N - 1) = tailPVA.col(2).transpose();
+
+        A.factorizeLU();
+        A.solve(b);
+
+        return;
+    }
+
+    inline void getTrajectory(Trajectory<5, 2>& traj) const {
+        traj.clear();
+        traj.reserve(N);
+        for (int i = 0; i < N; i++) {
+            traj.emplace_back(T1(i), b.block<6, 2>(6 * i, 0).transpose().rowwise().reverse());
+        }
+        return;
+    }
+
+    inline void getEnergy(double& energy) const {
+        energy = 0.0;
+        for (int i = 0; i < N; i++) {
+            energy += 36.0 * (b.row(6 * i + 3) * energyWeights).dot(b.row(6 * i + 3)) * T1(i)
+                + 144.0 * (b.row(6 * i + 4) * energyWeights).dot(b.row(6 * i + 3)) * T2(i)
+                + 192.0 * (b.row(6 * i + 4) * energyWeights).dot(b.row(6 * i + 4)) * T3(i)
+                + 240.0 * (b.row(6 * i + 5) * energyWeights).dot(b.row(6 * i + 3)) * T3(i)
+                + 720.0 * (b.row(6 * i + 5) * energyWeights).dot(b.row(6 * i + 4)) * T4(i)
+                + 720.0 * (b.row(6 * i + 5) * energyWeights).dot(b.row(6 * i + 5)) * T5(i);
+        }
+        return;
+    }
+
+    inline const Eigen::MatrixX2d& getCoeffs(void) const {
+        return b;
+    }
+
+    inline void getEnergyPartialGradByCoeffs(Eigen::MatrixX2d& gdC) const {
+        gdC.resize(6 * N, 2);
+        for (int i = 0; i < N; i++) {
+            gdC.row(6 * i + 5) = 240.0 * b.row(6 * i + 3) * energyWeights * T3(i)
+                + 720.0 * b.row(6 * i + 4) * energyWeights * T4(i)
+                + 1440.0 * b.row(6 * i + 5) * energyWeights * T5(i);
+            gdC.row(6 * i + 4) = 144.0 * b.row(6 * i + 3) * energyWeights * T2(i)
+                + 384.0 * b.row(6 * i + 4) * energyWeights * T3(i)
+                + 720.0 * b.row(6 * i + 5) * energyWeights * T4(i);
+            gdC.row(6 * i + 3) = 72.0 * b.row(6 * i + 3) * energyWeights * T1(i)
+                + 144.0 * b.row(6 * i + 4) * energyWeights * T2(i)
+                + 240.0 * b.row(6 * i + 5) * energyWeights * T3(i);
+            gdC.block<3, 2>(6 * i, 0).setZero();
+        }
+        return;
+    }
+
+    inline void getEnergyPartialGradByTimes(Eigen::VectorXd& gdT) const {
+        gdT.resize(N);
+        for (int i = 0; i < N; i++) {
+            gdT(i) = 36.0 * (b.row(6 * i + 3) * energyWeights).dot(b.row(6 * i + 3))
+                + 288.0 * (b.row(6 * i + 4) * energyWeights).dot(b.row(6 * i + 3)) * T1(i)
+                + 576.0 * (b.row(6 * i + 4) * energyWeights).dot(b.row(6 * i + 4)) * T2(i)
+                + 720.0 * (b.row(6 * i + 5) * energyWeights).dot(b.row(6 * i + 3)) * T2(i)
+                + 2880.0 * (b.row(6 * i + 5) * energyWeights).dot(b.row(6 * i + 4)) * T3(i)
+                + 3600.0 * (b.row(6 * i + 5) * energyWeights).dot(b.row(6 * i + 5)) * T4(i);
+        }
+        return;
+    }
+
+    inline void propogateGrad(
+        const Eigen::MatrixX2d& partialGradByCoeffs,
+        const Eigen::VectorXd& partialGradByTimes,
+        Eigen::Matrix2Xd& gradByPoints,
+        Eigen::VectorXd& gradByTimes
+    ) {
+        gradByPoints.resize(2, N - 1);
+        gradByTimes.resize(N);
+        Eigen::MatrixX2d adjGrad = partialGradByCoeffs;
+        A.solveAdj(adjGrad);
+
+        for (int i = 0; i < N - 1; i++) {
+            gradByPoints.col(i) = adjGrad.row(6 * i + 5).transpose();
+        }
+
+        Eigen::Matrix<double, 6, 2> B1;
+        Eigen::Matrix<double, 3, 2> B2;
+        for (int i = 0; i < N - 1; i++) {
+            // negative velocity
+            B1.row(2) =
+                -(b.row(i * 6 + 1) + 2.0 * T1(i) * b.row(i * 6 + 2) + 3.0 * T2(i) * b.row(i * 6 + 3)
+                  + 4.0 * T3(i) * b.row(i * 6 + 4) + 5.0 * T4(i) * b.row(i * 6 + 5));
+            B1.row(3) = B1.row(2);
+
+            // negative acceleration
+            B1.row(4) =
+                -(2.0 * b.row(i * 6 + 2) + 6.0 * T1(i) * b.row(i * 6 + 3)
+                  + 12.0 * T2(i) * b.row(i * 6 + 4) + 20.0 * T3(i) * b.row(i * 6 + 5));
+
+            // negative jerk
+            B1.row(5) =
+                -(6.0 * b.row(i * 6 + 3) + 24.0 * T1(i) * b.row(i * 6 + 4)
+                  + 60.0 * T2(i) * b.row(i * 6 + 5));
+
+            // negative snap
+            B1.row(0) = -(24.0 * b.row(i * 6 + 4) + 120.0 * T1(i) * b.row(i * 6 + 5));
+
+            // negative crackle
+            B1.row(1) = -120.0 * b.row(i * 6 + 5);
+
+            gradByTimes(i) = B1.cwiseProduct(adjGrad.block<6, 2>(6 * i + 3, 0)).sum();
+        }
+
+        // negative velocity
+        B2.row(0) =
+            -(b.row(6 * N - 5) + 2.0 * T1(N - 1) * b.row(6 * N - 4)
+              + 3.0 * T2(N - 1) * b.row(6 * N - 3) + 4.0 * T3(N - 1) * b.row(6 * N - 2)
+              + 5.0 * T4(N - 1) * b.row(6 * N - 1));
+
+        // negative acceleration
+        B2.row(1) =
+            -(2.0 * b.row(6 * N - 4) + 6.0 * T1(N - 1) * b.row(6 * N - 3)
+              + 12.0 * T2(N - 1) * b.row(6 * N - 2) + 20.0 * T3(N - 1) * b.row(6 * N - 1));
+
+        // negative jerk
+        B2.row(2) =
+            -(6.0 * b.row(6 * N - 3) + 24.0 * T1(N - 1) * b.row(6 * N - 2)
+              + 60.0 * T2(N - 1) * b.row(6 * N - 1));
+
+        gradByTimes(N - 1) = B2.cwiseProduct(adjGrad.block<3, 2>(6 * N - 3, 0)).sum();
+        gradByTimes += partialGradByTimes;
+    }
+
+    // relax final state but just relax arc length
+    inline void propogateArcLenghGrad(
+        const Eigen::MatrixX2d& partialGradByCoeffs,
+        const Eigen::VectorXd& partialGradByTimes,
+        Eigen::Matrix2Xd& gradByPoints,
+        Eigen::VectorXd& gradByTimes,
+        double& gradByTailStateS
+    ) {
+        gradByPoints.resize(2, N - 1);
+        gradByTimes.resize(N);
+        Eigen::MatrixX2d adjGrad = partialGradByCoeffs;
+        A.solveAdj(adjGrad);
+
+        for (int i = 0; i < N - 1; i++) {
+            gradByPoints.col(i) = adjGrad.row(6 * i + 5).transpose();
+        }
+
+        Eigen::Matrix<double, 6, 2> B1;
+        Eigen::Matrix<double, 3, 2> B2;
+        for (int i = 0; i < N - 1; i++) {
+            // negative velocity
+            B1.row(2) =
+                -(b.row(i * 6 + 1) + 2.0 * T1(i) * b.row(i * 6 + 2) + 3.0 * T2(i) * b.row(i * 6 + 3)
+                  + 4.0 * T3(i) * b.row(i * 6 + 4) + 5.0 * T4(i) * b.row(i * 6 + 5));
+            B1.row(3) = B1.row(2);
+
+            // negative acceleration
+            B1.row(4) =
+                -(2.0 * b.row(i * 6 + 2) + 6.0 * T1(i) * b.row(i * 6 + 3)
+                  + 12.0 * T2(i) * b.row(i * 6 + 4) + 20.0 * T3(i) * b.row(i * 6 + 5));
+
+            // negative jerk
+            B1.row(5) =
+                -(6.0 * b.row(i * 6 + 3) + 24.0 * T1(i) * b.row(i * 6 + 4)
+                  + 60.0 * T2(i) * b.row(i * 6 + 5));
+
+            // negative snap
+            B1.row(0) = -(24.0 * b.row(i * 6 + 4) + 120.0 * T1(i) * b.row(i * 6 + 5));
+
+            // negative crackle
+            B1.row(1) = -120.0 * b.row(i * 6 + 5);
+
+            gradByTimes(i) = B1.cwiseProduct(adjGrad.block<6, 2>(6 * i + 3, 0)).sum();
+        }
+
+        // negative velocity
+        B2.row(0) =
+            -(b.row(6 * N - 5) + 2.0 * T1(N - 1) * b.row(6 * N - 4)
+              + 3.0 * T2(N - 1) * b.row(6 * N - 3) + 4.0 * T3(N - 1) * b.row(6 * N - 2)
+              + 5.0 * T4(N - 1) * b.row(6 * N - 1));
+
+        // negative acceleration
+        B2.row(1) =
+            -(2.0 * b.row(6 * N - 4) + 6.0 * T1(N - 1) * b.row(6 * N - 3)
+              + 12.0 * T2(N - 1) * b.row(6 * N - 2) + 20.0 * T3(N - 1) * b.row(6 * N - 1));
+
+        // negative jerk
+        B2.row(2) =
+            -(6.0 * b.row(6 * N - 3) + 24.0 * T1(N - 1) * b.row(6 * N - 2)
+              + 60.0 * T2(N - 1) * b.row(6 * N - 1));
+
+        gradByTimes(N - 1) = B2.cwiseProduct(adjGrad.block<3, 2>(6 * N - 3, 0)).sum();
+
+        gradByTimes += partialGradByTimes;
+
+        gradByTailStateS = adjGrad(6 * N - 3, 1);
+    }
+
+    // relax final state
+    inline void propogateArcYawLenghGrad(
+        const Eigen::MatrixX2d& partialGradByCoeffs,
+        const Eigen::VectorXd& partialGradByTimes,
+        Eigen::Matrix2Xd& gradByPoints,
+        Eigen::VectorXd& gradByTimes,
+        Eigen::Vector2d& gradByTailStateS
+    ) {
+        gradByPoints.resize(2, N - 1);
+        gradByTimes.resize(N);
+        Eigen::MatrixX2d adjGrad = partialGradByCoeffs;
+        A.solveAdj(adjGrad);
+
+        for (int i = 0; i < N - 1; i++) {
+            gradByPoints.col(i) = adjGrad.row(6 * i + 5).transpose();
+        }
+
+        Eigen::Matrix<double, 6, 2> B1;
+        Eigen::Matrix<double, 3, 2> B2;
+        for (int i = 0; i < N - 1; i++) {
+            // negative velocity
+            B1.row(2) =
+                -(b.row(i * 6 + 1) + 2.0 * T1(i) * b.row(i * 6 + 2) + 3.0 * T2(i) * b.row(i * 6 + 3)
+                  + 4.0 * T3(i) * b.row(i * 6 + 4) + 5.0 * T4(i) * b.row(i * 6 + 5));
+            B1.row(3) = B1.row(2);
+
+            // negative acceleration
+            B1.row(4) =
+                -(2.0 * b.row(i * 6 + 2) + 6.0 * T1(i) * b.row(i * 6 + 3)
+                  + 12.0 * T2(i) * b.row(i * 6 + 4) + 20.0 * T3(i) * b.row(i * 6 + 5));
+
+            // negative jerk
+            B1.row(5) =
+                -(6.0 * b.row(i * 6 + 3) + 24.0 * T1(i) * b.row(i * 6 + 4)
+                  + 60.0 * T2(i) * b.row(i * 6 + 5));
+
+            // negative snap
+            B1.row(0) = -(24.0 * b.row(i * 6 + 4) + 120.0 * T1(i) * b.row(i * 6 + 5));
+
+            // negative crackle
+            B1.row(1) = -120.0 * b.row(i * 6 + 5);
+
+            gradByTimes(i) = B1.cwiseProduct(adjGrad.block<6, 2>(6 * i + 3, 0)).sum();
+        }
+
+        // negative velocity
+        B2.row(0) =
+            -(b.row(6 * N - 5) + 2.0 * T1(N - 1) * b.row(6 * N - 4)
+              + 3.0 * T2(N - 1) * b.row(6 * N - 3) + 4.0 * T3(N - 1) * b.row(6 * N - 2)
+              + 5.0 * T4(N - 1) * b.row(6 * N - 1));
+
+        // negative acceleration
+        B2.row(1) =
+            -(2.0 * b.row(6 * N - 4) + 6.0 * T1(N - 1) * b.row(6 * N - 3)
+              + 12.0 * T2(N - 1) * b.row(6 * N - 2) + 20.0 * T3(N - 1) * b.row(6 * N - 1));
+
+        // negative jerk
+        B2.row(2) =
+            -(6.0 * b.row(6 * N - 3) + 24.0 * T1(N - 1) * b.row(6 * N - 2)
+              + 60.0 * T2(N - 1) * b.row(6 * N - 1));
+
+        gradByTimes(N - 1) = B2.cwiseProduct(adjGrad.block<3, 2>(6 * N - 3, 0)).sum();
+
+        gradByTimes += partialGradByTimes;
+
+        gradByTailStateS = adjGrad.row(6 * N - 3).transpose();
+    }
+
+    /////////////// debug  ///////////////////////////////////
+    inline Eigen::MatrixXd getHeadPVA(void) {
+        return headPVA;
+    }
+
+    inline Eigen::MatrixXd getTailPVA(void) {
+        return tailPVA;
+    }
+};
+
 } // namespace minco

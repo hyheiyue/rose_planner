@@ -30,9 +30,14 @@ find_package(rose_map REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(ACADO REQUIRED)
+find_package(OsqpEigen REQUIRED)
+find_package(osqp REQUIRED)
+set(OSQP_LIB_PATH /usr/local/lib/libosqp.so)  
+message(STATUS "Using manually specified OSQP C library: ${OSQP_LIB_PATH}")
 add_library(ACADO STATIC IMPORTED)
-include_directories(sim_diff_drive222)
-set_target_properties(ACADO PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/sim_diff_drive222/libacado_exported_rti.a")
+set(ACADO_MPC_MODEL sim_diff_drive222)
+include_directories(${ACADO_MPC_MODEL})
+set_target_properties(ACADO PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/${ACADO_MPC_MODEL}/libacado_exported_rti.a")
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -51,6 +56,9 @@ target_link_libraries(${PROJECT_NAME}
     ${CERES_LIBRARIES}
     ${ACADO_SHARED_LIBRARIES}
     ACADO
+    ${OSQP_LIB_PATH}
+    OsqpEigen::OsqpEigen
+    
 )
 ament_target_dependencies(${PROJECT_NAME}
     rclcpp

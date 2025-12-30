@@ -21,13 +21,12 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
 
     int start_idx = rose_map_->key2DToIndex2D(start);
     int goal_idx = rose_map_->key2DToIndex2D(goal);
-    if (start_idx < 0 || goal_idx < 0)
+    if (start_idx < 0)
         return SearchState::NO_PATH;
 
     Node sn;
     sn.key = start;
     sn.g = 0.0f;
-    sn.idx = start_idx;
     sn.esdf = rose_map_->esdf_[start_idx];
     float h_start = heuristicCached(sn.esdf, start, goal);
     sn.f = sn.g + h_start;
@@ -62,7 +61,7 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
             continue;
 
         // goal reached
-        if (nodes_[cid].idx == goal_idx) {
+        if (nodes_[cid].key == goal) {
             path.clear();
             for (int id = cid; id >= 0; id = nodes_[id].parent) {
                 auto w = rose_map_->key2DToWorld(nodes_[id].key);
@@ -105,7 +104,6 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
                 nn.g = ng;
                 nn.f = nf;
                 nn.parent = cid;
-                nn.idx = nb_idx;
                 nn.esdf = d;
                 int nid = (int)nodes_.size();
                 nodes_.push_back(nn);

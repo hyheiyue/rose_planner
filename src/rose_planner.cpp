@@ -8,7 +8,8 @@
 #include "trajectory_optimize/trajectory_opt.hpp"
 #include "trajectory_optimize/trajectory_sampler.hpp"
 #include <angles.h>
-#include <mpc_control/acado_mpc.hpp>
+// #include <mpc_control/acado_mpc.hpp>
+#include "mpc_control/osqp_mpc.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -16,6 +17,13 @@ namespace rose_planner {
 struct RosePlanner::Impl {
 public:
     using SearchType = AStar;
+    ~Impl() {
+        running_ = false;
+        if (timer_thread_.joinable())
+            timer_thread_.join();
+        if (control_timer_thread_.joinable())
+            control_timer_thread_.join();
+    }
 
     Impl(rclcpp::Node& node): tf_buffer_(node.get_clock()) {
         node_ = &node;
@@ -24,7 +32,8 @@ public:
         rose_map_ = std::make_shared<rose_map::RoseMap>(node);
         path_search_ = SearchType::create(rose_map_, parameters_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
-        mpc_ = AcadoMpc::create(parameters_);
+        // mpc_ = AcadoMpc::create(parameters_);
+        mpc_ = OsqpMpc::create(parameters_);
         target_frame_ = node.declare_parameter<std::string>("target_frame", "");
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
         odometry_sub_ = node.create_subscription<nav_msgs::msg::Odometry>(
@@ -50,15 +59,39 @@ public:
         opt_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("opt_path", 10);
         predict_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("predict_path", 10);
         cmd_vel_pub_ = node.create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
-        timer_ = node.create_wall_timer(
-            std::chrono::milliseconds(100),
-            std::bind(&RosePlanner::Impl::timerCallback, this)
-        );
-        control_timer_ = node.create_wall_timer(
-            std::chrono::milliseconds(10),
-            std::bind(&RosePlanner::Impl::mpcSolverCallback, this)
-        );
+        // timer_ = node.create_wall_timer(
+        //     std::chrono::milliseconds(100),
+        //     std::bind(&RosePlanner::Impl::timerCallback, this)
+        // );
+        // control_timer_ = node.create_wall_timer(
+        //     std::chrono::milliseconds(10),
+        //     std::bind(&RosePlanner::Impl::mpcCallback, this)
+        // );
+        timer_thread_ = std::thread([this]() {
+            while (running_) {
+                auto start = std::chrono::steady_clock::now();
+                timerCallback(); // 你原来的回调
+                auto end = std::chrono::steady_clock::now();
+                auto cost =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+                if (cost < 100)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100 - cost));
+            }
+        });
 
+        // 10ms 控制/MPC timer
+        control_timer_thread_ = std::thread([this]() {
+            while (running_) {
+                auto start = std::chrono::steady_clock::now();
+                mpcCallback(); // 你原来的 MPC 控制回调
+                auto end = std::chrono::steady_clock::now();
+                auto cost =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+                if (cost < 10)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10 - cost));
+            }
+        });
+        use_control_output_ = node.declare_parameter<bool>("use_control_output", false);
         replan_fsm_.state_ = ReplanFSM::INIT;
         RCLCPP_INFO(node_->get_logger(), "RosePlanner initialized");
     }
@@ -118,7 +151,7 @@ public:
                 );
 
                 localReplan(unsafe_points, goal_pos);
-
+                // searchOnce(goal_pos);
                 break;
             }
 
@@ -145,122 +178,53 @@ public:
         last_yaw_ = yaw;
         return yaw;
     }
-    std::vector<double>
-    update_states(std::vector<double> state, double vx_cmd, double vy_cmd, double w_cmd) {
-        // based on kinematic model
-        double x0 = state[0];
-        double y0 = state[1];
-        double q0 = state[2];
-        double vx = vx_cmd;
-        double vy = vy_cmd;
-        double w0 = w_cmd;
 
-        double x1 = x0 + (vx * cos(q0) - vy * sin(q0)) * Ts;
-        double y1 = y0 + (vx * sin(q0) + vy * cos(q0)) * Ts;
-
-        double q1 = q0 + w0 * Ts;
-        return { x1, y1, q1 };
-    }
-    std::vector<double> motion_prediction(
-        const std::vector<double>& cur_states,
-        const std::vector<std::vector<double>>& prev_u
-    ) {
-        std::vector<double> old_vx_cmd = prev_u[0];
-        std::vector<double> old_vy_cmd = prev_u[1];
-        std::vector<double> old_w_cmd = prev_u[2];
-
-        std::vector<std::vector<double>> predicted_states;
-        predicted_states.push_back(cur_states);
-
-        for (int i = 0; i < N; i++) {
-            std::vector<double> cur_state = predicted_states[i];
-            std::vector<double> next_state =
-                update_states(cur_state, old_vx_cmd[i], old_vy_cmd[i], old_w_cmd[i]);
-            predicted_states.push_back(next_state);
-        }
-
-        std::vector<double> result;
-        for (int i = 0; i < (ACADO_N + 1); ++i) {
-            for (int j = 0; j < NX; ++j) {
-                result.push_back(predicted_states[i][j]);
-            }
-        }
-        return result;
-    }
-
-    void mpcSolverCallback() {
-        if (replan_fsm_.state_ != ReplanFSM::REPLAN) {
+    void mpcCallback() {
+        if (replan_fsm_.state_ != ReplanFSM::REPLAN || current_traj_.getPieceNum() < 1
+            || !have_traj_) {
             return;
         }
-        const double Ts_local = Ts; // 0.1s
-        const int N_horizon = N;
-        const double totalDur = current_traj_.getTotalDuration();
+        mpc_->setTrajectory(current_traj_);
+        Eigen::Vector2d start_v(
+            current_odom_.twist.twist.linear.x,
+            current_odom_.twist.twist.linear.y
+        );
+        MPCState now_state;
+        now_state.x = current_pose_.position.x;
+        now_state.y = current_pose_.position.y;
+        now_state.vx = start_v.x();
+        now_state.vy = start_v.y();
+        mpc_->setCurrent(now_state);
+        mpc_->solve();
+        if (use_control_output_) {
+            Eigen::VectorXd output = mpc_->getOutput(); // 这里是世界坐标系速度 (vx, vy)
 
-        std::vector<Eigen::Vector2d> pts = current_traj_.toPointVector(Ts_local);
-        if (pts.size() < 2) {
-            return;
+            // 1. 取当前yaw
+            double yaw = orientationToYaw(current_pose_.orientation);
+
+            // 2. 世界速度转车体坐标系
+            double vx_world = output(0);
+            double vy_world = output(1);
+
+            double vx_body = std::cos(yaw) * vx_world + std::sin(yaw) * vy_world;
+            double vy_body = -std::sin(yaw) * vx_world + std::cos(yaw) * vy_world;
+
+            // 3. 发布 cmd_vel
+            geometry_msgs::msg::Twist cmd;
+            cmd.linear.x = vx_body;
+            cmd.linear.y = vy_body;
+            cmd_vel_pub_->publish(cmd);
         }
-
-        Eigen::Vector2d robot_pos(current_pose_.position.x, current_pose_.position.y);
-        double current_yaw = orientationToYaw(current_pose_.orientation);
-
-        int closest_index = 0;
-        double min_dist = 1e9;
-        for (int i = 0; i < (int)pts.size(); ++i) {
-            double dist = (pts[i] - robot_pos).norm();
-            if (dist < min_dist) {
-                min_dist = dist;
-                closest_index = i;
-            }
-        }
-        double t0 = closest_index * Ts_local;
-        t0 = std::clamp(t0, 0.0, totalDur);
-
-        std::vector<double> ref_states;
-        ref_states.reserve(6 * N_horizon);
-        double t_cur = t0;
-        for (int i = 0; i < N_horizon; ++i) {
-            if (t_cur > totalDur)
-                t_cur = totalDur;
-
-            Eigen::VectorXd pos = current_traj_.getPos(t_cur);
-            Eigen::VectorXd vel = current_traj_.getVel(t_cur);
-            Eigen::VectorXd acc = current_traj_.getAcc(t_cur);
-            double yaw = atan2(vel.y(), vel.x());
-            yaw = angles::shortest_angular_distance(current_yaw, yaw) + current_yaw;
-            double yawdot = (vel.x() * acc.y() - vel.y() * acc.x())
-                / (vel.x() * vel.x() + vel.y() * vel.y() + 1e-6);
-
-            ref_states.push_back(pos.x());
-            ref_states.push_back(pos.y());
-            ref_states.push_back(yaw);
-            ref_states.push_back(vel.x());
-            ref_states.push_back(vel.y());
-            ref_states.push_back(yawdot);
-
-            t_cur += Ts_local;
-            t_cur = std::clamp(t_cur, 0.0, totalDur);
-        }
-
-        std::vector<double> cur_vec = { robot_pos.x(), robot_pos.y(), current_yaw };
-        auto predicted = motion_prediction(cur_vec, mpc_->control_output_);
-
-        mpc_->control_output_ = mpc_->solve(predicted, ref_states);
-
-        geometry_msgs::msg::Twist cmd;
-        cmd.linear.x = mpc_->control_output_[0][0];
-        cmd.linear.y = mpc_->control_output_[1][0];
-        cmd.angular.z = mpc_->control_output_[2][0];
-        cmd_vel_pub_->publish(cmd);
 
         nav_msgs::msg::Path predict_path;
         predict_path.header.frame_id = target_frame_;
         predict_path.header.stamp = rclcpp::Clock().now();
-
         geometry_msgs::msg::PoseStamped pose_msg;
-        for (int i = 0; i < ACADO_N; ++i) {
-            pose_msg.pose.position.x = acadoVariables.x[NX * i + 0];
-            pose_msg.pose.position.y = acadoVariables.x[NX * i + 1];
+        for (int i = 0; i < mpc_->T; ++i) {
+            pose_msg.pose.position.x = mpc_->xopt[i].x;
+            pose_msg.pose.position.y = mpc_->xopt[i].y;
+            pose_msg.pose.position.z = current_pose_.position.z;
+            // pose_msg.pose.orientation = tf2::f(mpc_->xopt[i].theta);
             predict_path.poses.push_back(pose_msg);
         }
         predict_path_pub_->publish(predict_path);
@@ -281,20 +245,28 @@ public:
     }
 
     void localReplan(const std::vector<int>& unsafe_points, const Eigen::Vector2f& goal_w) {
-        if (current_raw_path_.empty())
+        if (current_raw_path_.size() < 2) {
+            RCLCPP_WARN(node_->get_logger(), "Raw path too short for local replan.");
             return;
-        int Num = (int)current_raw_path_.size();
-        int local_end_idx;
-        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
-        if (unsafe_points.empty()) {
-            local_end_idx = findClosestPointIndex(start_w, current_raw_path_);
-        } else {
-            local_end_idx = unsafe_points.back();
         }
+
+        const int Num = static_cast<int>(current_raw_path_.size());
+        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
+
+        int local_end_idx = unsafe_points.empty()
+            ? findClosestPointIndex(start_w, current_raw_path_)
+            : unsafe_points.back();
+
         local_end_idx = std::clamp(local_end_idx, 0, Num - 1);
 
+        int next_idx = local_end_idx + 1;
+        if (next_idx >= Num) {
+            RCLCPP_WARN(node_->get_logger(), "Local replan end is last point, skipping.");
+            return;
+        }
+
         std::vector<Eigen::Vector2d> path_after(
-            current_raw_path_.begin() + local_end_idx + 1,
+            current_raw_path_.begin() + next_idx,
             current_raw_path_.end()
         );
 
@@ -304,7 +276,7 @@ public:
         try {
             search_state = path_search_->search(
                 start_w.cast<float>(),
-                current_raw_path_[local_end_idx].cast<float>(),
+                current_raw_path_[next_idx].cast<float>(),
                 local_path
             );
         } catch (const std::exception& e) {
@@ -312,28 +284,65 @@ public:
             search_state = SearchState::NO_PATH;
         }
 
-        if (search_state != SearchState::SUCCESS) {
-            RCLCPP_WARN(node_->get_logger(), "Local replan failed, falling back to global search");
+        if (search_state != SearchState::SUCCESS || local_path.size() < 2) {
+            RCLCPP_WARN(node_->get_logger(), "Local replan failed, fallback to global.");
             replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
             return;
         }
 
+        const double stitch_dist = segmentLength(local_path.back(), path_after.front());
+        if (stitch_dist > 1.0) { // 若跳变过大，插值一个过渡点
+            Eigen::Vector2d mid = 0.5 * (local_path.back() + path_after.front());
+            local_path.emplace_back(mid);
+            RCLCPP_INFO(node_->get_logger(), "Inserted stitch midpoint for smooth connection.");
+        }
+
         std::vector<Eigen::Vector2d> new_raw_path;
         new_raw_path.reserve(local_path.size() + path_after.size());
+
         for (const auto& p: local_path) {
             new_raw_path.emplace_back(p.x(), p.y());
         }
         new_raw_path.insert(new_raw_path.end(), path_after.begin(), path_after.end());
 
-        current_raw_path_.swap(new_raw_path);
+        std::vector<Eigen::Vector2d> filtered;
+        filtered.reserve(new_raw_path.size());
+        filtered.push_back(new_raw_path.front());
+
+        for (size_t i = 1; i < new_raw_path.size(); i++) {
+            double d = segmentLength(filtered.back(), new_raw_path[i]);
+            if (d > 0.05) {
+                filtered.push_back(new_raw_path[i]);
+            }
+        }
+
+        if (filtered.size() < 2) {
+            RCLCPP_WARN(node_->get_logger(), "Filtered path invalid, aborting replan.");
+            return;
+        }
+        auto backup = current_raw_path_;
+        current_raw_path_.swap(filtered);
+
         RCLCPP_INFO(
             node_->get_logger(),
-            "Local replan succeeded (%zu new points), optimizing trajectory",
+            "Local replan succeeded (%zu new pts), optimizing trajectory.",
             local_path.size()
         );
+        bool opt_ok = false;
+        try {
+            resampleAndOpt(current_raw_path_);
+            opt_ok = true;
+        } catch (...) {
+            RCLCPP_ERROR(node_->get_logger(), "Trajectory optimization crashed! Reverting path.");
+        }
 
-        resampleAndOpt(current_raw_path_);
+        if (!opt_ok) {
+            current_raw_path_ = backup;
+            replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
+            return;
+        }
     }
+
     int findClosestPointIndex(
         const Eigen::Vector2d& start_w,
         const std::vector<Eigen::Vector2d>& current_path
@@ -468,17 +477,17 @@ public:
         traj_opt_->optimize();
         auto opt_traj = traj_opt_->getTrajectory();
         current_traj_ = opt_traj;
-
+        have_traj_ = true;
         // Publish raw path
         if (raw_path_pub_->get_subscription_count() > 0) {
-            for (const auto& point: traj) {
+            for (int i = 0; i < (int)traj.size(); i = i + 3) {
                 geometry_msgs::msg::PoseStamped pose_msg;
                 pose_msg.header = raw_path_msg.header;
-                pose_msg.pose.position.x = point.p.x();
-                pose_msg.pose.position.y = point.p.y();
+                pose_msg.pose.position.x = traj[i].p.x();
+                pose_msg.pose.position.y = traj[i].p.y();
                 pose_msg.pose.position.z = current_goal_.pose.position.z;
 
-                float yaw = std::atan2(point.v.y(), point.v.x());
+                double yaw = std::atan2(traj[i].v.y(), traj[i].v.x());
                 tf2::Quaternion q;
                 q.setRPY(0, 0, yaw);
                 q.normalize();
@@ -494,15 +503,37 @@ public:
 
         // Publish optimized path
         if (opt_path_pub_->get_subscription_count() > 0) {
-            for (const auto& point:
-                 opt_traj.toPointVector(parameters_.path_search_params_.resampler.dt)) {
-                geometry_msgs::msg::PoseStamped pose_msg;
-                pose_msg.header = opt_path_msg.header;
-                pose_msg.pose.position.x = point.x();
-                pose_msg.pose.position.y = point.y();
-                pose_msg.pose.position.z = current_goal_.pose.position.z;
-                opt_path_msg.poses.push_back(pose_msg);
+            double totalDur = opt_traj.getTotalDuration();
+            double dt = parameters_.path_search_params_.resampler.dt;
+            int sampleNum = static_cast<int>(totalDur / dt) + 2; // 采样点数
+
+            double t_cur = 0.0;
+            opt_path_msg.poses.clear();
+
+            for (int i = 0; i < sampleNum; ++i) {
+                Eigen::VectorXd pos = opt_traj.getPos(t_cur);
+                Eigen::VectorXd vel = opt_traj.getVel(t_cur);
+                if (pos.size() < 2 || vel.size() < 2)
+                    break; // 保护
+
+                double yaw =
+                    std::hypot(vel.x(), vel.y()) > 1e-3 ? std::atan2(vel.y(), vel.x()) : 0.0;
+
+                geometry_msgs::msg::PoseStamped p;
+                p.header = opt_path_msg.header;
+                p.pose.position.x = pos.x();
+                p.pose.position.y = pos.y();
+                p.pose.position.z = current_goal_.pose.position.z;
+
+                tf2::Quaternion q;
+                q.setRPY(0, 0, yaw);
+                q.normalize();
+                p.pose.orientation = tf2::toMsg(q);
+
+                opt_path_msg.poses.push_back(p);
+                t_cur = std::min(t_cur + dt, totalDur); // 不卡死、不越界
             }
+
             opt_path_pub_->publish(opt_path_msg);
         }
     }
@@ -652,7 +683,6 @@ public:
         return T;
     }
 
-private:
     Parameters parameters_;
     rclcpp::Node* node_;
 
@@ -662,11 +692,17 @@ private:
 
     geometry_msgs::msg::Pose current_pose_;
     double last_yaw_;
+    bool use_control_output_ = false;
     nav_msgs::msg::Odometry current_odom_;
     geometry_msgs::msg::PoseStamped current_goal_;
     rclcpp::Time start_time_;
     ReplanFSM replan_fsm_;
-    AcadoMpc::Ptr mpc_;
+    std::thread timer_thread_;
+    std::thread control_timer_thread_;
+    std::atomic<bool> running_ { true };
+    // AcadoMpc::Ptr mpc_;
+    OsqpMpc::Ptr mpc_;
+    bool have_traj_ = false;
     Trajectory<3, 2> current_traj_;
     std::vector<Eigen::Vector2d> current_raw_path_;
     std::string target_frame_;

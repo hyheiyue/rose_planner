@@ -30,12 +30,31 @@ public:
         }
     } opt_params;
     struct MpcParams {
-        double weight_p, weight_yaw, weight_v, weight_w;
+        double dt = 0.1;
+        int max_iter = 100;
+        int predict_steps = 30;
+        double max_speed = 2.0;
+        double min_speed = 0.5;
+        double max_accel = 1.0;
+        int delay_num = 1;
+        std::vector<double> Q = { 15.0, 15.0, 0.5, 0.5 };
+
+        // 控制变化正则/参考权重 [vx_cmd, vy_cmd]
+        std::vector<double> Rd = { 1.0, 0.05 };
+
+        // 控制输入正则权重（不能为0，否则QP不稳定）
+        std::vector<double> R = { 0.1, 0.1 };
         void load(rclcpp::Node& node) {
-            weight_p = node.declare_parameter<double>("mpc_control.weight_p", weight_p);
-            weight_yaw = node.declare_parameter<double>("mpc_control.weight_yaw", weight_yaw);
-            weight_v = node.declare_parameter<double>("mpc_control.weight_v", weight_v);
-            weight_w = node.declare_parameter<double>("mpc_control.weight_w", weight_w);
+            dt = node.declare_parameter<double>("mpc_control.dt", dt);
+            max_iter = node.declare_parameter<int>("mpc_control.max_iter", max_iter);
+            predict_steps = node.declare_parameter<int>("mpc_control.predict_steps", predict_steps);
+            max_speed = node.declare_parameter<double>("mpc_control.max_speed", max_speed);
+            min_speed = node.declare_parameter<double>("mpc_control.min_speed", min_speed);
+            max_accel = node.declare_parameter<double>("mpc_control.max_accel", max_accel);
+            delay_num = node.declare_parameter<int>("mpc_control.delay_num", delay_num);
+            Q = node.declare_parameter<std::vector<double>>("mpc_control.Q", Q);
+            Rd = node.declare_parameter<std::vector<double>>("mpc_control.Rd", Rd);
+            R = node.declare_parameter<std::vector<double>>("mpc_control.R", R);
         }
     } mpc_params;
     struct PathSearchParams {

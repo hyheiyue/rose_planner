@@ -125,11 +125,10 @@ inline std::vector<double> computeVelocityProfile(
         v[i] = std::min(expected_vel, v[i + 1] + dv);
     }
 
-    // 加入曲率软约束：曲率大时更贴近参考速度，而不是作为上限裁剪
     for (size_t i = 0; i < n; i++) {
         double k = kappa[i];
         double soft_factor = 1.0 / (1.0 + 2.0 * k); // k 越大 factor 越小，但不会降到 0
-        v[i] = expected_vel * (1.0 - 0.2 * (1.0 - soft_factor)); // 80%~100% 贴近参考速度
+        v[i] = expected_vel * (1.0 - 0.7 * (1.0 - soft_factor)); // 80%~100% 贴近参考速度
     }
 
     return v;

@@ -76,6 +76,37 @@ public:
         }
         return pos;
     }
+    inline double getYaw(const double& t) const {
+        // 用速度方向计算 yaw
+        Eigen::VectorXd v = getVel(t);
+        if (v.size() < 2)
+            return 0.0;
+        double vx = v(0);
+        double vy = v(1);
+        // 速度过小时方向不可信，保护一下
+        if (std::hypot(vx, vy) < 1e-6) {
+            return getYaw(0.0); // 回退到起点方向
+        }
+        return std::atan2(vy, vx);
+    }
+
+    inline double getYawDot(const double& t) const {
+        // yaw 导数公式 (ax*vy - ay*vx)/(vx^2+vy^2)
+        Eigen::VectorXd v = getVel(t);
+        Eigen::VectorXd a = getAcc(t);
+        if (v.size() < 2 || a.size() < 2)
+            return 0.0;
+
+        double vx = v(0);
+        double vy = v(1);
+        double ax = a(0);
+        double ay = a(1);
+
+        double v2 = vx * vx + vy * vy;
+        if (v2 < 1e-12)
+            return 0.0; // 速度太小，角速度设 0 避免爆炸
+        return (ax * vy - ay * vx) / v2;
+    }
 
     inline Eigen::VectorXd getVel(const double& t) const {
         Eigen::VectorXd vel;
@@ -439,7 +470,14 @@ public:
         int pieceIdx = locatePieceIdx(t);
         return pieces[pieceIdx].getPos(t);
     }
-
+    inline double getYaw(double t) const {
+        int pieceIdx = locatePieceIdx(t);
+        return pieces[pieceIdx].getYaw(t);
+    }
+    inline double getYawDot(double t) const {
+        int pieceIdx = locatePieceIdx(t);
+        return pieces[pieceIdx].getYawDot(t);
+    }
     inline Eigen::VectorXd getVel(double t) const {
         int pieceIdx = locatePieceIdx(t);
         return pieces[pieceIdx].getVel(t);
@@ -522,5 +560,67 @@ public:
             feasible = feasible && pieces[i].checkMaxAccRate(maxAccRate);
         }
         return feasible;
+    }
+    inline double getTimeByPos(const Eigen::Vector2d& pos, double eps = 1e-3) const {
+        const double phi = 0.6180339887498949; // 黄金比例
+
+        double t_global = 0.0;
+
+        for (int i = 0; i < getPieceNum(); i++) {
+            double T = pieces[i].getDuration();
+
+            // 黄金分割搜索 τ ∈ [0, T]
+            double left = 0.0;
+            double right = T;
+            double c = right - phi * (right - left);
+            double d = left + phi * (right - left);
+
+            double tau_best = -1.0;
+            double dist_best = 1e9;
+
+            Eigen::Vector2d pc = pieces[i].getPos(c);
+            Eigen::Vector2d pd = pieces[i].getPos(d);
+            double fc = (pc - pos).norm();
+            double fd = (pd - pos).norm();
+
+            for (int iter = 0; iter < 30; iter++) {
+                if (fc < dist_best) {
+                    dist_best = fc;
+                    tau_best = c;
+                }
+                if (fd < dist_best) {
+                    dist_best = fd;
+                    tau_best = d;
+                }
+                if (fc < eps)
+                    return t_global + c;
+                if (fd < eps)
+                    return t_global + d;
+                if (fc > fd) {
+                    left = c;
+                    c = d;
+                    fc = fd;
+                    d = left + phi * (right - left);
+                    pc = pieces[i].getPos(d);
+                    fd = (pc - pos).norm();
+                } else {
+                    right = d;
+                    d = c;
+                    fd = fc;
+                    c = right - phi * (right - left);
+                    pd = pieces[i].getPos(c);
+                    fc = (pd - pos).norm();
+                }
+            }
+
+            // 结束后检查最优点是否足够接近
+            if (dist_best < eps) {
+                return t_global + tau_best;
+            }
+
+            t_global += T;
+        }
+
+        return -1.0; // 全轨迹未找到
     }
 };

@@ -29,7 +29,6 @@ public:
         float g = 0.0f;
         float f = 0.0f;
         int parent = -1;
-        int idx = -1; // ESDF index
         float esdf = 0.0f; // cached clearance value
     };
 
