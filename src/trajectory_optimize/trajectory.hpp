@@ -346,27 +346,41 @@ public:
         if (pieces.empty())
             return pts;
 
-        pts.reserve(getTotalDuration() / dt + 2);
+        // 1. 计算合理的长度（用 double 计算避免 size_t overflow）
+        double totalT = getTotalDuration();
+        double n_est = 0.0;
 
-        double t_accum = 0.0;
+        if (dt > 1e-9 && totalT > 0.0 && std::isfinite(dt) && std::isfinite(totalT)) {
+            n_est = std::ceil(totalT / dt) + 2;
+        }
 
-        for (int i = 0; i < getPieceNum(); i++) {
+        // 2. clamp 到安全范围，防止 vector::reserve 触发 std::length_error
+        size_t N = 0;
+        if (n_est > 0.0 && n_est < 1e7) {
+            N = static_cast<size_t>(n_est);
+        }
+
+        const size_t MAX_RESERVE = 5000; // 轨迹采样不可能需要更大
+        N = std::min(N, MAX_RESERVE);
+
+        pts.reserve(N); // ✔ 现在绝对安全
+
+        // 3. 采样
+        for (int i = 0; i < getPieceNum(); ++i) {
             double T = pieces[i].getDuration();
             double t = 0.0;
 
-            // 每段内部采样
             while (t < T) {
                 pts.push_back(pieces[i].getPos(t));
                 t += dt;
             }
 
-            // 确保每段终点被加入一次（避免误差导致漏掉）
-            pts.push_back(pieces[i].getPos(T));
-            t_accum += T;
+            pts.push_back(pieces[i].getPos(T)); // 终点兜底
         }
 
         return pts;
     }
+
     inline int getPieceNum() const {
         return pieces.size();
     }

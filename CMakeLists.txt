@@ -29,15 +29,12 @@ find_package(TBB REQUIRED)
 find_package(rose_map REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
-find_package(ACADO REQUIRED)
 find_package(OsqpEigen REQUIRED)
 find_package(osqp REQUIRED)
 set(OSQP_LIB_PATH /usr/local/lib/libosqp.so)  
+include_directories(/usr/local/include/osqp)  
 message(STATUS "Using manually specified OSQP C library: ${OSQP_LIB_PATH}")
-add_library(ACADO STATIC IMPORTED)
-set(ACADO_MPC_MODEL sim_diff_drive222)
-include_directories(${ACADO_MPC_MODEL})
-set_target_properties(ACADO PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/${ACADO_MPC_MODEL}/libacado_exported_rti.a")
+
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -46,7 +43,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     src
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${OpenCV_INCLUDE_DIRS}
-    ${ACADO_INCLUDE_DIR}
+    ${OSQP_LNC_PATH}
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -54,8 +51,6 @@ target_link_libraries(${PROJECT_NAME}
     yaml-cpp
     TBB::tbb
     ${CERES_LIBRARIES}
-    ${ACADO_SHARED_LIBRARIES}
-    ACADO
     ${OSQP_LIB_PATH}
     OsqpEigen::OsqpEigen
     

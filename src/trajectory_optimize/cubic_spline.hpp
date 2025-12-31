@@ -510,7 +510,6 @@ public:
             gradByPoints.col(i) = gradcur.row(4 * i + 3).transpose();
         }
     }
-    
 };
 
 } // namespace rose_planner

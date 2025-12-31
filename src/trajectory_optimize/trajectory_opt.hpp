@@ -3,6 +3,7 @@
 #include "../parameters.hpp"
 #include "cubic_spline.hpp"
 #include "lbfgs.hpp"
+#include "minco.hpp"
 #include "rose_map/rose_map.hpp"
 
 #include <algorithm>
@@ -19,10 +20,12 @@ public:
         params_(params) {
         w_obs = params_.opt_params.obstacle_weight;
         w_smooth = params_.opt_params.smooth_weight;
+        w_time = params_.opt_params.time_weight;
     }
     static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {
         return std::make_shared<TrajectoryOpt>(rose_map, params);
     }
+
     void setSampledPath(
         const std::vector<SampleTrajectoryPoint>& sampled,
         double sample_dt,
@@ -41,7 +44,54 @@ public:
         ctx_.pieceNum = ctx_.path.size() - 1;
         ctx_.sample_dt = sample_dt;
         ctx_.init_obs = true;
-        cubSpline_.setConditions(ctx_.head_pos, init_v, ctx_.tail_pos, ctx_.pieceNum);
+        Eigen::Matrix<double, 2, 3> headState;
+        headState << ctx_.head_pos, init_v, Eigen::Vector2d::Zero();
+        Eigen::Matrix<double, 2, 3> tailState;
+        tailState << ctx_.tail_pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
+        minco_.setConditions(
+            headState,
+            tailState,
+            ctx_.pieceNum,
+            Eigen::Vector2d(w_smooth, w_smooth)
+        );
+    }
+    template<typename EIGENVEC>
+    inline void RealT2VirtualT(const Eigen::VectorXd& RT, EIGENVEC& VT) {
+        const int sizeT = RT.size();
+        VT.resize(sizeT);
+        for (int i = 0; i < sizeT; ++i) {
+            VT(i) = RT(i) > 1.0 ? (sqrt(2.0 * RT(i) - 1.0) - 1.0) : (1.0 - sqrt(2.0 / RT(i) - 1.0));
+        }
+    }
+
+    template<typename EIGENVEC>
+    inline void VirtualT2RealT(const EIGENVEC& VT, Eigen::VectorXd& RT) {
+        const int sizeTau = VT.size();
+        RT.resize(sizeTau);
+        for (int i = 0; i < sizeTau; ++i) {
+            RT(i) = VT(i) > 0.0 ? ((0.5 * VT(i) + 1.0) * VT(i) + 1.0)
+                                : 1.0 / ((0.5 * VT(i) - 1.0) * VT(i) + 1.0);
+        }
+    }
+    template<typename EIGENVEC>
+    inline void static backwardGradT(
+        const Eigen::VectorXd& tau,
+        const Eigen::VectorXd& gradT,
+        EIGENVEC& gradTau
+    ) {
+        const int sizetau = tau.size();
+        gradTau.resize(sizetau);
+        double gradrt2vt;
+        for (int i = 0; i < sizetau; i++) {
+            if (tau(i) > 0) {
+                gradrt2vt = tau(i) + 1.0;
+            } else {
+                double denSqrt = (0.5 * tau(i) - 1.0) * tau(i) + 1.0;
+                gradrt2vt = (1.0 - tau(i)) / (denSqrt * denSqrt);
+            }
+            gradTau(i) = gradT(i) * gradrt2vt;
+        }
+        return;
     }
     void optimize() {
         if (ctx_.skip) {
@@ -49,22 +99,37 @@ public:
             ctx_.path.clear();
             return;
         }
-        Eigen::VectorXd x(ctx_.pieceNum * 2 - 2);
 
-        for (int i = 0; i < ctx_.pieceNum - 1; i++) { // 控制点
+        const int pieceNum = ctx_.pieceNum;
+        const int ctrlNum = pieceNum - 1;
+
+        Eigen::VectorXd x(3 * pieceNum - 1);
+
+        for (int i = 0; i < ctrlNum; ++i) {
             x(i) = ctx_.path[i + 1].x();
-            x(i + ctx_.pieceNum - 1) = ctx_.path[i + 1].y();
+            x(i + ctrlNum) = ctx_.path[i + 1].y();
         }
 
+        Eigen::VectorXd inTimes(pieceNum);
+        for (int i = 0; i < pieceNum; ++i) {
+            inTimes(i) = ctx_.sample_dt + 1e-3 * (i % 2);
+        }
+
+        Eigen::VectorXd virtualT(pieceNum);
+        RealT2VirtualT(inTimes, virtualT);
+        const int timeOffset = 2 * ctrlNum;
+        x.segment(timeOffset, pieceNum) = virtualT;
         double minCost = 0.0;
-        lbfgs_params_.mem_size = 64; // 32
-        lbfgs_params_.past = 5;
-        lbfgs_params_.min_step = 1.0e-32;
-        lbfgs_params_.g_epsilon = 2.0e-5;
-        lbfgs_params_.delta = 2e-5; // 3e-4
-        lbfgs_params_.max_linesearch = 32; // 32
-        lbfgs_params_.f_dec_coeff = 1.0e-4;
+        lbfgs_params_.mem_size = 256;
+        lbfgs_params_.past = 20;
+        lbfgs_params_.min_step = 1e-16;
+        lbfgs_params_.g_epsilon = 0.0;
+        lbfgs_params_.delta = 1e-7;
+        lbfgs_params_.max_iterations = 8000;
+        lbfgs_params_.max_linesearch = 32;
+        lbfgs_params_.f_dec_coeff = 1e-4;
         lbfgs_params_.s_curv_coeff = 0.9;
+
         int ret = lbfgs::lbfgs_optimize(
             x,
             minCost,
@@ -74,96 +139,116 @@ public:
             this,
             lbfgs_params_
         );
-        if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
-            if (ret > 0) {
-                // std::cout << "[Smooth Optimize] Optimization Success: "
-                //           << lbfgs::lbfgs_strerror(ret) << std::endl;
-            } else if (ret == 0) {
-                // std::cout << "[Smooth Optimize] Optimization STOP: " << lbfgs::lbfgs_strerror(ret)
-                //           << std::endl;
-            } else {
-                // std::cout
-                //     << "[Smooth Optimize] Optimization reaches the maximum number of evaluations: "
-                //     << lbfgs::lbfgs_strerror(ret) << std::endl;
-            }
 
-            for (int i = 0; i < ctx_.pieceNum - 1; i++) {
-                ctx_.path[i + 1].x() = x(i);
-                ctx_.path[i + 1].y() = x(i + ctx_.pieceNum - 1);
-            }
-            Eigen::Matrix2Xd inPs;
-            const int points_num = ctx_.pieceNum - 1;
-            inPs.resize(2, points_num);
-            inPs.row(0) = x.head(points_num);
-            inPs.row(1) = x.tail(points_num);
-            Eigen::VectorXd inTimes;
-            inTimes.resize(ctx_.pieceNum);
-            for (int i = 0; i < ctx_.pieceNum; i++) {
-                inTimes(i) = ctx_.sample_dt;
-            }
-            cubSpline_.setInnerPoints(inPs, inTimes);
-            cubSpline_.getTrajectory(finalTraj_);
-            ctx_.pathInPs.resize(2, ctx_.pieceNum - 1);
-            ctx_.pathInPs.row(0) = x.head(ctx_.pieceNum - 1);
-            ctx_.pathInPs.row(1) = x.segment(ctx_.pieceNum - 1, ctx_.pieceNum - 1);
+        if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
+            std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
         } else {
-            ctx_.path.clear();
-            std::cout << "[Smooth Optimize] Optimization Failed: " << lbfgs::lbfgs_strerror(ret);
+            std::cout << "[Smooth Optimize] FAIL: " << lbfgs::lbfgs_strerror(ret) << std::endl;
         }
+        for (int i = 0; i < ctrlNum; ++i) {
+            ctx_.path[i + 1].x() = x(i);
+            ctx_.path[i + 1].y() = x(i + ctrlNum);
+        }
+        Eigen::Matrix2Xd inPs(2, ctrlNum);
+        inPs.row(0) = x.head(ctrlNum).transpose();
+        inPs.row(1) = x.segment(ctrlNum, ctrlNum).transpose();
+
+        virtualT = x.segment(timeOffset, pieceNum);
+        inTimes.setConstant(ctx_.sample_dt);
+
+        VirtualT2RealT(virtualT, inTimes);
+
+        minco_.setParameters(inPs, inTimes);
+        minco_.getTrajectory(finalTraj_);
+        ctx_.pathInPs.resize(2, ctrlNum);
+        ctx_.pathInPs.row(0) = inPs.row(0);
+        ctx_.pathInPs.row(1) = inPs.row(1);
     }
 
     static double cost(void* ptr, const Eigen::VectorXd& x, Eigen::VectorXd& g) {
         if (!ptr || !x.allFinite() || x.norm() > 1e3) {
-            g.setZero();
+            if (g.size() > 0)
+                g.setZero();
             return 1e6;
         }
 
-        auto* instance = reinterpret_cast<TrajectoryOpt*>(ptr);
-        const int points_num = instance->ctx_.pieceNum - 1;
+        auto* instance = static_cast<TrajectoryOpt*>(ptr);
+        if (!instance) {
+            if (g.size() > 0)
+                g.setZero();
+            return 1e6;
+        }
 
-        Eigen::Matrix2Xd grad = Eigen::Matrix2Xd::Zero(2, points_num);
+        const int pieceNum = instance->ctx_.pieceNum;
+        const int points_num = pieceNum - 1;
+
         double cost_val = 0.0;
+        int idx = 0;
+        Eigen::Matrix2Xd inPs(2, points_num);
+        inPs.row(0) = x.segment(idx, points_num).transpose();
+        idx += points_num;
+        inPs.row(1) = x.segment(idx, points_num).transpose();
+        idx += points_num;
+        Eigen::VectorXd t = x.segment(idx, pieceNum);
+        idx += pieceNum;
 
-        Eigen::Matrix2Xd inPs = Eigen::Matrix2Xd::Zero(2, points_num);
-        inPs.row(0) = x.head(points_num);
-        inPs.row(1) = x.tail(points_num);
+        Eigen::Matrix2Xd gradp = Eigen::Matrix2Xd::Zero(2, points_num);
+        Eigen::VectorXd gradt = Eigen::VectorXd::Zero(pieceNum);
 
-        Eigen::VectorXd inTimes(instance->ctx_.pieceNum);
-        for (int i = 0; i < instance->ctx_.pieceNum; i++) {
+        Eigen::VectorXd inTimes(pieceNum);
+        for (int i = 0; i < pieceNum; ++i) {
             inTimes(i) = instance->ctx_.sample_dt + 1e-3 * (i % 2);
         }
 
-        instance->cubSpline_.setInnerPoints(inPs, inTimes);
+        instance->VirtualT2RealT(t, inTimes);
 
-        // 计算平滑能量
-        double energy;
+        instance->minco_.setParameters(inPs, inTimes);
+
+        double energy = 0.0;
         Eigen::Matrix2Xd energy_grad = Eigen::Matrix2Xd::Zero(2, points_num);
-        Eigen::VectorXd energyT_grad(instance->ctx_.pieceNum);
-        instance->cubSpline_.getEnergy(energy);
-        instance->cubSpline_.getGradSmooth(energy_grad, energyT_grad);
+        Eigen::VectorXd energyT_grad = Eigen::VectorXd::Zero(pieceNum);
+
+        Eigen::Matrix2Xd gradByPoints;
+        Eigen::VectorXd gradByTimes;
+        Eigen::MatrixX2d partialGradByCoeffs;
+        Eigen::VectorXd partialGradByTimes;
+        instance->minco_.getEnergyPartialGradByCoeffs(partialGradByCoeffs);
+        instance->minco_.getEnergyPartialGradByTimes(partialGradByTimes);
+        instance->minco_.getEnergy(energy);
+        instance->minco_
+            .propogateGrad(partialGradByCoeffs, partialGradByTimes, energy_grad, energyT_grad);
 
         if (!std::isfinite(energy))
             energy = 0.0;
-        energy *= instance->w_smooth;
-        energy_grad *= instance->w_smooth;
 
+        Eigen::Vector2d gradByTailStateS;
+        instance->minco_.propogateArcYawLenghGrad(
+            partialGradByCoeffs,
+            partialGradByTimes,
+            gradByPoints,
+            gradByTimes,
+            gradByTailStateS
+        );
         cost_val += energy;
-        grad += energy_grad;
-
+        gradp += energy_grad;
+        gradp += gradByPoints;
         for (int i = 0; i < points_num; ++i) {
             double nearest_cost = 0.0;
             Eigen::Vector2d x_cur = inPs.col(i);
             Eigen::Vector2d obs_grad = instance->obstacleTerm(x_cur, nearest_cost);
             cost_val += nearest_cost;
-            grad.col(i) += obs_grad;
+            gradp.col(i) += obs_grad;
         }
-
-
+        cost_val += instance->w_time * inTimes.sum();
+        Eigen::VectorXd rhotimes;
+        rhotimes.resize(gradByTimes.size());
+        gradByTimes += instance->w_time * rhotimes.setOnes();
+        instance->backwardGradT(t, gradByTimes, gradt);
         g.setZero();
-        g.head(points_num) = grad.row(0).transpose();
-        g.tail(points_num) = grad.row(1).transpose();
+        g.segment(0, points_num) = gradp.row(0).transpose();
+        g.segment(points_num, points_num) = gradp.row(1).transpose();
+        g.segment(2 * points_num, pieceNum) = gradt;
 
-        // 代价值 clamp 避免线搜索失败
         return std::clamp(cost_val, 0.0, 1e4);
     }
 
@@ -276,7 +361,7 @@ public:
         return out_dist < R;
     }
 
-    Trajectory<3, 2> getTrajectory() {
+    TrajType getTrajectory() {
         return finalTraj_;
     }
     std::vector<Eigen::Vector2d> getPath() {
@@ -296,11 +381,12 @@ public:
 
     rose_map::RoseMap::Ptr rose_map_;
     Parameters params_;
-    CubicSpline cubSpline_;
-    Trajectory<3, 2> finalTraj_;
+    minco::MINCO_S3NU minco_;
+    TrajType finalTraj_;
     lbfgs::lbfgs_parameter_t lbfgs_params_;
     double w_obs = 1.0;
     double w_smooth = 1.0;
+    double w_time = 1.0;
 };
 
 } // namespace rose_planner

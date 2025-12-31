@@ -59,18 +59,10 @@ public:
         opt_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("opt_path", 10);
         predict_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("predict_path", 10);
         cmd_vel_pub_ = node.create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
-        // timer_ = node.create_wall_timer(
-        //     std::chrono::milliseconds(100),
-        //     std::bind(&RosePlanner::Impl::timerCallback, this)
-        // );
-        // control_timer_ = node.create_wall_timer(
-        //     std::chrono::milliseconds(10),
-        //     std::bind(&RosePlanner::Impl::mpcCallback, this)
-        // );
         timer_thread_ = std::thread([this]() {
             while (running_) {
                 auto start = std::chrono::steady_clock::now();
-                timerCallback(); // 你原来的回调
+                timerCallback();
                 auto end = std::chrono::steady_clock::now();
                 auto cost =
                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -79,11 +71,10 @@ public:
             }
         });
 
-        // 10ms 控制/MPC timer
         control_timer_thread_ = std::thread([this]() {
             while (running_) {
                 auto start = std::chrono::steady_clock::now();
-                mpcCallback(); // 你原来的 MPC 控制回调
+                mpcCallback();
                 auto end = std::chrono::steady_clock::now();
                 auto cost =
                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -118,15 +109,43 @@ public:
             frame_count = 0;
             last_fps_time = current_time;
         }
-
         switch (replan_fsm_.state_) {
-            case ReplanFSM::INIT:
+            case ReplanFSM::INIT: {
                 RCLCPP_DEBUG(node_->get_logger(), "FSM: INIT");
-                break;
+            }
 
-            case ReplanFSM::WAIT_GOAL:
+            break;
+
+            case ReplanFSM::WAIT_GOAL: {
+                static auto t_start = std::chrono::steady_clock::now();
+                static bool timing = false;
+                if (change_to_wait_) {
+                    change_to_wait_ = false;
+                    t_start = std::chrono::steady_clock::now();
+                    timing = true;
+                    RCLCPP_INFO(node_->get_logger(), "change to wait goal pub stop 1s");
+                }
+
                 RCLCPP_DEBUG(node_->get_logger(), "FSM: WAIT_GOAL");
-                break;
+
+                if (timing) {
+                    double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+                                    std::chrono::steady_clock::now() - t_start
+                    )
+                                    .count();
+                    if (dt < 1.0) {
+                        geometry_msgs::msg::Twist cmd;
+                        cmd.linear.x = 0;
+                        cmd.linear.y = 0;
+                        cmd.angular.z = 0;
+                        cmd_vel_pub_->publish(cmd);
+                    } else {
+                        timing = false;
+                    }
+                }
+            }
+
+            break;
 
             case ReplanFSM::REPLAN: {
                 Eigen::Vector2f goal_pos(
@@ -142,6 +161,7 @@ public:
                         "Goal reached (dist=%.2f m), waiting for new goal",
                         dist_to_goal
                     );
+                    change_to_wait_ = true;
                     replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
                     break;
                 }
@@ -163,6 +183,7 @@ public:
                 RCLCPP_INFO(node_->get_logger(), "New goal received, starting global search");
                 replan_fsm_.state_ = ReplanFSM::REPLAN;
                 searchOnce(goal_w);
+
                 break;
             }
         }
@@ -197,22 +218,20 @@ public:
         mpc_->setCurrent(now_state);
         mpc_->solve();
         if (use_control_output_) {
-            Eigen::VectorXd output = mpc_->getOutput(); // 这里是世界坐标系速度 (vx, vy)
+            Eigen::VectorXd output = mpc_->getOutput();
 
-            // 1. 取当前yaw
             double yaw = orientationToYaw(current_pose_.orientation);
 
-            // 2. 世界速度转车体坐标系
             double vx_world = output(0);
             double vy_world = output(1);
 
             double vx_body = std::cos(yaw) * vx_world + std::sin(yaw) * vy_world;
             double vy_body = -std::sin(yaw) * vx_world + std::cos(yaw) * vy_world;
 
-            // 3. 发布 cmd_vel
             geometry_msgs::msg::Twist cmd;
             cmd.linear.x = vx_body;
             cmd.linear.y = vy_body;
+            cmd.angular.z = 3.14;
             cmd_vel_pub_->publish(cmd);
         }
 
@@ -220,11 +239,18 @@ public:
         predict_path.header.frame_id = target_frame_;
         predict_path.header.stamp = rclcpp::Clock().now();
         geometry_msgs::msg::PoseStamped pose_msg;
-        for (int i = 0; i < mpc_->T; ++i) {
-            pose_msg.pose.position.x = mpc_->xopt[i].x;
-            pose_msg.pose.position.y = mpc_->xopt[i].y;
+        for (int i = 0; i < mpc_->T_; ++i) {
+            pose_msg.header = predict_path.header;
+            pose_msg.pose.position.x = mpc_->xopt_[i].x;
+            pose_msg.pose.position.y = mpc_->xopt_[i].y;
             pose_msg.pose.position.z = current_pose_.position.z;
-            // pose_msg.pose.orientation = tf2::f(mpc_->xopt[i].theta);
+            double yaw = std::hypot(mpc_->xopt_[i].vx, mpc_->xopt_[i].vy) > 1e-3
+                ? std::atan2(mpc_->xopt_[i].vy, mpc_->xopt_[i].vx)
+                : 0.0;
+            tf2::Quaternion q;
+            q.setRPY(0, 0, yaw);
+            q.normalize();
+            pose_msg.pose.orientation = tf2::toMsg(q);
             predict_path.poses.push_back(pose_msg);
         }
         predict_path_pub_->publish(predict_path);
@@ -247,6 +273,8 @@ public:
     void localReplan(const std::vector<int>& unsafe_points, const Eigen::Vector2f& goal_w) {
         if (current_raw_path_.size() < 2) {
             RCLCPP_WARN(node_->get_logger(), "Raw path too short for local replan.");
+            replan_fsm_.state_ = ReplanFSM::STATE::WAIT_GOAL;
+            change_to_wait_ = true;
             return;
         }
 
@@ -262,6 +290,8 @@ public:
         int next_idx = local_end_idx + 1;
         if (next_idx >= Num) {
             RCLCPP_WARN(node_->get_logger(), "Local replan end is last point, skipping.");
+            replan_fsm_.state_ = ReplanFSM::STATE::WAIT_GOAL;
+            change_to_wait_ = true;
             return;
         }
 
@@ -350,8 +380,8 @@ public:
         if (current_path.empty())
             return -1;
 
-        constexpr double TARGET_DIST = 2.0; // 目标 1.5m
-        constexpr double TOLERANCE = 0.5; // 允许误差 ±0.3m
+        constexpr double TARGET_DIST = 2.0;
+        constexpr double TOLERANCE = 0.5;
         constexpr double TARGET_DIST2 = TARGET_DIST * TARGET_DIST;
 
         int best_index = 0;
@@ -365,17 +395,15 @@ public:
 
             double diff2 = std::abs(dist2 - TARGET_DIST2);
 
-            // 记录全局最接近 1.5m 的点
             if (diff2 < best_diff2) {
                 best_diff2 = diff2;
                 best_index = i;
                 best_target_index = i;
             }
 
-            // 头部优先匹配 1.5m ± TOLERANCE
             double dist = std::sqrt(dist2);
             if (dist > TARGET_DIST - TOLERANCE && dist < TARGET_DIST + TOLERANCE) {
-                return i; // 头部优先命中直接返回
+                return i;
             }
         }
 
@@ -442,6 +470,7 @@ public:
         } else if (search_state == SearchState::TIMEOUT) {
             RCLCPP_WARN(node_->get_logger(), "A* search timeout, abandoning current goal");
             replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
+            change_to_wait_ = true;
         }
     }
 
@@ -485,7 +514,7 @@ public:
                 pose_msg.header = raw_path_msg.header;
                 pose_msg.pose.position.x = traj[i].p.x();
                 pose_msg.pose.position.y = traj[i].p.y();
-                pose_msg.pose.position.z = current_goal_.pose.position.z;
+                pose_msg.pose.position.z = current_pose_.position.z;
 
                 double yaw = std::atan2(traj[i].v.y(), traj[i].v.x());
                 tf2::Quaternion q;
@@ -502,10 +531,10 @@ public:
         }
 
         // Publish optimized path
-        if (opt_path_pub_->get_subscription_count() > 0) {
+        if (opt_path_pub_->get_subscription_count() > 0 && opt_traj.getPieceNum() > 1) {
             double totalDur = opt_traj.getTotalDuration();
             double dt = parameters_.path_search_params_.resampler.dt;
-            int sampleNum = static_cast<int>(totalDur / dt) + 2; // 采样点数
+            int sampleNum = static_cast<int>(totalDur / dt) + 2;
 
             double t_cur = 0.0;
             opt_path_msg.poses.clear();
@@ -523,7 +552,7 @@ public:
                 p.header = opt_path_msg.header;
                 p.pose.position.x = pos.x();
                 p.pose.position.y = pos.y();
-                p.pose.position.z = current_goal_.pose.position.z;
+                p.pose.position.z = current_pose_.position.z;
 
                 tf2::Quaternion q;
                 q.setRPY(0, 0, yaw);
@@ -531,7 +560,7 @@ public:
                 p.pose.orientation = tf2::toMsg(q);
 
                 opt_path_msg.poses.push_back(p);
-                t_cur = std::min(t_cur + dt, totalDur); // 不卡死、不越界
+                t_cur = std::min(t_cur + dt, totalDur);
             }
 
             opt_path_pub_->publish(opt_path_msg);
@@ -697,17 +726,16 @@ public:
     geometry_msgs::msg::PoseStamped current_goal_;
     rclcpp::Time start_time_;
     ReplanFSM replan_fsm_;
+    bool change_to_wait_ = true;
     std::thread timer_thread_;
     std::thread control_timer_thread_;
     std::atomic<bool> running_ { true };
     // AcadoMpc::Ptr mpc_;
     OsqpMpc::Ptr mpc_;
     bool have_traj_ = false;
-    Trajectory<3, 2> current_traj_;
+    TrajType current_traj_;
     std::vector<Eigen::Vector2d> current_raw_path_;
     std::string target_frame_;
-    rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
