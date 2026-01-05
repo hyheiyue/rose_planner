@@ -17,6 +17,7 @@ namespace rose_planner {
 struct RosePlanner::Impl {
 public:
     using SearchType = AStar;
+    constexpr static double default_wz = 0.0;
     ~Impl() {
         running_ = false;
         if (timer_thread_.joinable())
@@ -84,9 +85,13 @@ public:
         });
         use_control_output_ = node.declare_parameter<bool>("use_control_output", false);
         replan_fsm_.state_ = ReplanFSM::INIT;
+        dynamic_replan_ = node.declare_parameter<bool>("dynamic_replan", false);
         RCLCPP_INFO(node_->get_logger(), "RosePlanner initialized");
     }
-
+    Eigen::Vector2d getCurrentVel() {
+        Eigen::Vector2d v(current_odom_.twist.twist.linear.x, current_odom_.twist.twist.linear.y);
+        return v;
+    }
     void timerCallback() {
         static auto last_fps_time = node_->now();
         static int frame_count = 0;
@@ -133,11 +138,11 @@ public:
                                     std::chrono::steady_clock::now() - t_start
                     )
                                     .count();
-                    if (dt < 1.0) {
+                    if (dt < 1.0 && use_control_output_) {
                         geometry_msgs::msg::Twist cmd;
                         cmd.linear.x = 0;
                         cmd.linear.y = 0;
-                        cmd.angular.z = 0;
+                        cmd.angular.z = default_wz;
                         cmd_vel_pub_->publish(cmd);
                     } else {
                         timing = false;
@@ -169,9 +174,12 @@ public:
                 auto unsafe_points = checkSafePath(
                     current_traj_.toPointVector(parameters_.path_search_params_.resampler.dt)
                 );
+                if (dynamic_replan_) {
+                    searchOnce(goal_pos);
+                } else {
+                    localReplan(unsafe_points, goal_pos);
+                }
 
-                localReplan(unsafe_points, goal_pos);
-                // searchOnce(goal_pos);
                 break;
             }
 
@@ -206,10 +214,7 @@ public:
             return;
         }
         mpc_->setTrajectory(current_traj_);
-        Eigen::Vector2d start_v(
-            current_odom_.twist.twist.linear.x,
-            current_odom_.twist.twist.linear.y
-        );
+        Eigen::Vector2d start_v = getCurrentVel();
         MPCState now_state;
         now_state.x = current_pose_.position.x;
         now_state.y = current_pose_.position.y;
@@ -231,7 +236,7 @@ public:
             geometry_msgs::msg::Twist cmd;
             cmd.linear.x = vx_body;
             cmd.linear.y = vy_body;
-            cmd.angular.z = 3.14;
+            cmd.angular.z = default_wz;
             cmd_vel_pub_->publish(cmd);
         }
 
@@ -271,19 +276,17 @@ public:
     }
 
     void localReplan(const std::vector<int>& unsafe_points, const Eigen::Vector2f& goal_w) {
-        if (current_raw_path_.size() < 2) {
+        if (current_raw_path_.size() < 2 || current_traj_.getTotalDuration() < 1.0)
+        {
             RCLCPP_WARN(node_->get_logger(), "Raw path too short for local replan.");
-            replan_fsm_.state_ = ReplanFSM::STATE::WAIT_GOAL;
-            change_to_wait_ = true;
             return;
         }
 
         const int Num = static_cast<int>(current_raw_path_.size());
         Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
 
-        int local_end_idx = unsafe_points.empty()
-            ? findClosestPointIndex(start_w, current_raw_path_)
-            : unsafe_points.back();
+        int local_end_idx = unsafe_points.empty() ? findHeadPointIndex(start_w, current_raw_path_)
+                                                  : unsafe_points.back();
 
         local_end_idx = std::clamp(local_end_idx, 0, Num - 1);
 
@@ -353,11 +356,11 @@ public:
         auto backup = current_raw_path_;
         current_raw_path_.swap(filtered);
 
-        RCLCPP_INFO(
-            node_->get_logger(),
-            "Local replan succeeded (%zu new pts), optimizing trajectory.",
-            local_path.size()
-        );
+        // RCLCPP_INFO(
+        //     node_->get_logger(),
+        //     "Local replan succeeded (%zu new pts), optimizing trajectory.",
+        //     local_path.size()
+        // );
         bool opt_ok = false;
         try {
             resampleAndOpt(current_raw_path_);
@@ -373,7 +376,7 @@ public:
         }
     }
 
-    int findClosestPointIndex(
+    int findHeadPointIndex(
         const Eigen::Vector2d& start_w,
         const std::vector<Eigen::Vector2d>& current_path
     ) {
@@ -484,11 +487,7 @@ public:
         opt_path_msg.header.stamp = node_->now();
         opt_path_msg.header.frame_id = target_frame_;
 
-        Eigen::Vector2d start_v(
-            current_odom_.twist.twist.linear.x,
-            current_odom_.twist.twist.linear.y
-        );
-        start_v = Eigen::Vector2d::Zero();
+        Eigen::Vector2d start_v = getCurrentVel();
         auto traj = sampleTrajectoryTrapezoid(
             path,
             parameters_.path_search_params_.resampler.acc,
@@ -496,17 +495,6 @@ public:
             parameters_.path_search_params_.resampler.dt,
             start_v
         );
-
-        traj_opt_->setSampledPath(
-            traj,
-            parameters_.path_search_params_.resampler.dt,
-            start_v.cast<double>()
-        );
-
-        traj_opt_->optimize();
-        auto opt_traj = traj_opt_->getTrajectory();
-        current_traj_ = opt_traj;
-        have_traj_ = true;
         // Publish raw path
         if (raw_path_pub_->get_subscription_count() > 0) {
             for (int i = 0; i < (int)traj.size(); i = i + 3) {
@@ -528,6 +516,18 @@ public:
                 raw_path_msg.poses.push_back(pose_msg);
             }
             raw_path_pub_->publish(raw_path_msg);
+        }
+        traj_opt_->setSampledPath(
+            traj,
+            parameters_.path_search_params_.resampler.dt,
+            start_v.cast<double>()
+        );
+
+        traj_opt_->optimize();
+        auto opt_traj = traj_opt_->getTrajectory();
+        if (opt_traj.getPieceNum() > 1) {
+            current_traj_ = opt_traj;
+            have_traj_ = true;
         }
 
         // Publish optimized path
@@ -718,7 +718,7 @@ public:
     SearchType::Ptr path_search_;
     rose_map::RoseMap::Ptr rose_map_;
     TrajectoryOpt::Ptr traj_opt_;
-
+    bool dynamic_replan_ = false;
     geometry_msgs::msg::Pose current_pose_;
     double last_yaw_;
     bool use_control_output_ = false;

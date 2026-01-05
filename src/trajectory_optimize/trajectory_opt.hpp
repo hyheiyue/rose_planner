@@ -2,6 +2,7 @@
 #include "../common.hpp"
 #include "../parameters.hpp"
 #include "cubic_spline.hpp"
+#include "flatness.hpp"
 #include "lbfgs.hpp"
 #include "minco.hpp"
 #include "rose_map/rose_map.hpp"
@@ -18,9 +19,10 @@ public:
     TrajectoryOpt(rose_map::RoseMap::Ptr rose_map, Parameters params):
         rose_map_(rose_map),
         params_(params) {
-        w_obs = params_.opt_params.obstacle_weight;
-        w_smooth = params_.opt_params.smooth_weight;
-        w_time = params_.opt_params.time_weight;
+        double base_scale = params_.opt_params.base_scale;
+        w_obs = params_.opt_params.obstacle_weight * base_scale;
+        w_smooth = params_.opt_params.smooth_weight * base_scale;
+        w_time = params_.opt_params.time_weight * base_scale;
     }
     static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {
         return std::make_shared<TrajectoryOpt>(rose_map, params);
@@ -45,6 +47,7 @@ public:
         ctx_.sample_dt = sample_dt;
         ctx_.init_obs = true;
         Eigen::Matrix<double, 2, 3> headState;
+        init_v = (ctx_.path[1] - ctx_.path[0]).normalized()*init_v.norm();
         headState << ctx_.head_pos, init_v, Eigen::Vector2d::Zero();
         Eigen::Matrix<double, 2, 3> tailState;
         tailState << ctx_.tail_pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
@@ -54,6 +57,7 @@ public:
             ctx_.pieceNum,
             Eigen::Vector2d(w_smooth, w_smooth)
         );
+        minco_.getTrajectory(finalTraj_);
     }
     template<typename EIGENVEC>
     inline void RealT2VirtualT(const Eigen::VectorXd& RT, EIGENVEC& VT) {
@@ -110,22 +114,22 @@ public:
             x(i + ctrlNum) = ctx_.path[i + 1].y();
         }
 
-        Eigen::VectorXd inTimes(pieceNum);
+        ctx_.inTimes.resize(pieceNum);
         for (int i = 0; i < pieceNum; ++i) {
-            inTimes(i) = ctx_.sample_dt + 1e-3 * (i % 2);
+            ctx_.inTimes(i) = ctx_.sample_dt + 1e-3 * (i % 2);
         }
 
         Eigen::VectorXd virtualT(pieceNum);
-        RealT2VirtualT(inTimes, virtualT);
+        RealT2VirtualT(ctx_.inTimes, virtualT);
         const int timeOffset = 2 * ctrlNum;
         x.segment(timeOffset, pieceNum) = virtualT;
         double minCost = 0.0;
         lbfgs_params_.mem_size = 256;
         lbfgs_params_.past = 20;
         lbfgs_params_.min_step = 1e-16;
-        lbfgs_params_.g_epsilon = 0.0;
-        lbfgs_params_.delta = 1e-7;
-        lbfgs_params_.max_iterations = 8000;
+        lbfgs_params_.g_epsilon = 2.0e-5;
+        lbfgs_params_.delta = 2e-5;
+        lbfgs_params_.max_iterations = 4000;
         lbfgs_params_.max_linesearch = 32;
         lbfgs_params_.f_dec_coeff = 1e-4;
         lbfgs_params_.s_curv_coeff = 0.9;
@@ -141,7 +145,7 @@ public:
         );
 
         if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
-            std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
+            //std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
         } else {
             std::cout << "[Smooth Optimize] FAIL: " << lbfgs::lbfgs_strerror(ret) << std::endl;
         }
@@ -154,11 +158,10 @@ public:
         inPs.row(1) = x.segment(ctrlNum, ctrlNum).transpose();
 
         virtualT = x.segment(timeOffset, pieceNum);
-        inTimes.setConstant(ctx_.sample_dt);
 
-        VirtualT2RealT(virtualT, inTimes);
+        VirtualT2RealT(virtualT, ctx_.inTimes);
 
-        minco_.setParameters(inPs, inTimes);
+        minco_.setParameters(inPs, ctx_.inTimes);
         minco_.getTrajectory(finalTraj_);
         ctx_.pathInPs.resize(2, ctrlNum);
         ctx_.pathInPs.row(0) = inPs.row(0);
@@ -195,14 +198,9 @@ public:
         Eigen::Matrix2Xd gradp = Eigen::Matrix2Xd::Zero(2, points_num);
         Eigen::VectorXd gradt = Eigen::VectorXd::Zero(pieceNum);
 
-        Eigen::VectorXd inTimes(pieceNum);
-        for (int i = 0; i < pieceNum; ++i) {
-            inTimes(i) = instance->ctx_.sample_dt + 1e-3 * (i % 2);
-        }
+        instance->VirtualT2RealT(t, instance->ctx_.inTimes);
 
-        instance->VirtualT2RealT(t, inTimes);
-
-        instance->minco_.setParameters(inPs, inTimes);
+        instance->minco_.setParameters(inPs, instance->ctx_.inTimes);
 
         double energy = 0.0;
         Eigen::Matrix2Xd energy_grad = Eigen::Matrix2Xd::Zero(2, points_num);
@@ -222,6 +220,7 @@ public:
             energy = 0.0;
 
         Eigen::Vector2d gradByTailStateS;
+        double gradByTailState;
         instance->minco_.propogateArcYawLenghGrad(
             partialGradByCoeffs,
             partialGradByTimes,
@@ -229,6 +228,7 @@ public:
             gradByTimes,
             gradByTailStateS
         );
+        // gradByTimes += energyT_grad;
         cost_val += energy;
         gradp += energy_grad;
         gradp += gradByPoints;
@@ -239,7 +239,7 @@ public:
             cost_val += nearest_cost;
             gradp.col(i) += obs_grad;
         }
-        cost_val += instance->w_time * inTimes.sum();
+        cost_val += instance->w_time * instance->ctx_.inTimes.sum();
         Eigen::VectorXd rhotimes;
         rhotimes.resize(gradByTimes.size());
         gradByTimes += instance->w_time * rhotimes.setOnes();
@@ -249,7 +249,23 @@ public:
         g.segment(points_num, points_num) = gradp.row(1).transpose();
         g.segment(2 * points_num, pieceNum) = gradt;
 
-        return std::clamp(cost_val, 0.0, 1e4);
+        return cost_val;
+    }
+    static inline bool smoothedL1(const double& x, const double& mu, double& f, double& df) {
+        if (x < 0.0) {
+            return false;
+        } else if (x > mu) {
+            f = x - 0.5 * mu;
+            df = 1.0;
+            return true;
+        } else {
+            const double xdmu = x / mu;
+            const double sqrxdmu = xdmu * xdmu;
+            const double mumxd2 = mu - 0.5 * x;
+            f = mumxd2 * sqrxdmu * xdmu;
+            df = sqrxdmu * ((-0.5) * xdmu + 3.0 * mumxd2 / mu);
+            return true;
+        }
     }
 
     Eigen::Vector2d obstacleTerm(const Eigen::Vector2d& xcur, double& nearest_cost) {
@@ -257,7 +273,7 @@ public:
         Eigen::Vector2d grad = Eigen::Vector2d::Zero();
 
         const double R = 1.0;
-        const double huber_delta = 0.6;
+        const double mu = 0.4;
 
         double d;
         Eigen::Vector2d g;
@@ -265,34 +281,30 @@ public:
             return grad;
         }
 
-        if (d > R)
+        if (d > R) {
             return grad;
+        }
 
         double penetration = R - d;
 
-        double cost_core = 0.0;
-        if (penetration < huber_delta) {
-            cost_core = 0.5 * penetration * penetration;
-        } else {
-            cost_core = huber_delta * (penetration - 0.5 * huber_delta);
+        double cost_s1 = 0.0, dcost_s1 = 0.0;
+        if (!smoothedL1(penetration, mu, cost_s1, dcost_s1)) {
+            return grad;
         }
 
-        // 安全距离增强
         double safe_margin = params_.robot_radius + 0.1;
         double w_safe = 1.0;
         if (d < safe_margin) {
             w_safe += 4.0 * (safe_margin - d) / safe_margin;
         }
 
-        nearest_cost = w_obs * cost_core * w_safe;
+        nearest_cost = w_obs * cost_s1 * w_safe;
+        Eigen::Vector2d dir = (g.norm() > 1e-6) ? g.normalized() : Eigen::Vector2d::Zero();
+        grad = w_obs * dcost_s1 * w_safe * (-dir);
 
-        // 梯度系数
-        double grad_core_coeff = (penetration < huber_delta) ? penetration : huber_delta;
-        double coeff = w_obs * grad_core_coeff * w_safe;
-
-        grad = coeff * (-g);
-        if (!grad.allFinite())
+        if (!grad.allFinite()) {
             grad.setZero();
+        }
 
         return grad;
     }
@@ -352,12 +364,6 @@ public:
         out_dist = 0.5 * (valx + valy);
         out_grad = Eigen::Vector2d(gradx, grady);
 
-        // 梯度限幅避免爆炸
-        const double max_grad = 5.0;
-        if (out_grad.norm() > max_grad) {
-            out_grad = out_grad.normalized() * max_grad;
-        }
-
         return out_dist < R;
     }
 
@@ -373,6 +379,7 @@ public:
         Eigen::Vector2d head_pos;
         Eigen::Vector2d tail_pos;
         Eigen::Matrix2Xd pathInPs;
+        Eigen::VectorXd inTimes;
         int pieceNum = 0;
         double sample_dt = 0.0;
         bool init_obs = true;
@@ -390,3 +397,146 @@ public:
 };
 
 } // namespace rose_planner
+// static inline void attachPenaltyFunctional(
+//     const Eigen::VectorXd& T,
+//     const Eigen::MatrixX2d&
+//         coeffs, // coeffs 仍是6×3分块，但只用前2列(x,y)，第3列yaw不再参与平坦映射
+//     const Eigen::VectorXi& hIdx,
+//     const PolyhedraH& hPolys,
+//     const double& smoothFactor,
+//     const int& integralResolution,
+//     const Eigen::VectorXd& magnitudeBounds,
+//     const Eigen::VectorXd& penaltyWeights,
+//     flatness::FlatnessMap2D&
+//         flatMap, // 你之后可以换成2D版本，但这里直接当成数学工具用，不再输出3D姿态
+//     double& cost,
+//     Eigen::VectorXd& gradT,
+//     Eigen::MatrixX2d& gradC
+// ) {
+//     const double velSqrMax = magnitudeBounds(0) * magnitudeBounds(0);
+//     const double omgSqrMax =
+//         magnitudeBounds(1) * magnitudeBounds(1); // 这里 omg 变成 yaw rate，依然可以用它做上界
+//     const double thrustMin = magnitudeBounds(2);
+//     const double thrustMax = magnitudeBounds(3);
+
+//     const double weightPos = penaltyWeights(0);
+//     const double weightVel = penaltyWeights(1);
+//     const double weightOmg = penaltyWeights(2);
+//     const double weightThrust = penaltyWeights(3);
+
+//     Eigen::Vector2d pos, vel, acc;
+//     Eigen::Vector2d totalGradPos, totalGradVel, totalGradAcc, totalGradJer;
+//     double totalGradPsi, totalGradPsiD;
+//     double thr;
+//     double yaw_rate; // 2D 角速度只保留 yaw
+//     double gradThr;
+//     double gradYawRate;
+//     Eigen::Vector2d gradPos, gradVel;
+//     double step, alpha;
+//     double s1, s2, s3, s4, s5;
+//     Eigen::Matrix<double, 6, 1> beta0, beta1, beta2, beta3;
+//     Eigen::Vector2d outerNormal2D;
+//     int K, L;
+//     double violaPos, violaVel, violaYawRate, violaThrust;
+//     double violaPosPenaD, violaVelPenaD, violaYawRatePenaD, violaThrustPenaD;
+//     double violaPosPena, violaVelPena, violaYawRatePena, violaThrustPena;
+//     double node, pena;
+
+//     const int pieceNum = T.size();
+//     const double integralFrac = 1.0 / integralResolution;
+
+//     for (int i = 0; i < pieceNum; i++) {
+//         const Eigen::Matrix<double, 6, 3>& c = coeffs.block<6, 3>(i * 6, 0);
+//         step = T(i) * integralFrac;
+
+//         for (int j = 0; j <= integralResolution; j++) {
+//             s1 = j * step;
+//             s2 = s1 * s1;
+//             s3 = s2 * s1;
+//             s4 = s2 * s2;
+//             s5 = s4 * s1;
+
+//             beta0 << 1.0, s1, s2, s3, s4, s5;
+//             beta1 << 0.0, 1.0, 2.0 * s1, 3.0 * s2, 4.0 * s3, 5.0 * s4;
+//             beta2 << 0.0, 0.0, 2.0, 6.0 * s1, 12.0 * s2, 20.0 * s3;
+//             beta3 << 0.0, 0.0, 0.0, 6.0, 24.0 * s1, 60.0 * s2;
+
+//             // 只计算 2D pos/vel/acc
+//             pos = c.block<2, 3>(0, 0).transpose() * beta0; // 取 (x,y) 多项式系数
+//             vel = c.block<2, 3>(0, 0).transpose() * beta1;
+//             acc = c.block<2, 3>(0, 0).transpose() * beta2;
+//             double jer2D_x = (c.block<2, 3>(0, 0).transpose() * beta3)(0);
+//             double jer2D_y = (c.block<2, 3>(0, 0).transpose() * beta3)(1);
+//             thr = massClamp(acc.norm(), thrustMin, thrustMax);
+//             yaw_rate = dpsi;
+
+//             violaVel = vel.squaredNorm() - velSqrMax;
+//             violaYawRate = yaw_rate * yaw_rate - omgSqrMax;
+//             violaThrust =
+//                 (thr < thrustMin ? thrustMin - thr : (thr > thrustMax ? thr - thrustMax : 0.0));
+
+//             gradThr = 0.0;
+//             gradYawRate = 0.0;
+//             gradPos.setZero(), gradVel.setZero();
+//             pena = 0.0;
+
+//             L = hIdx(i);
+//             K = hPolys[L].rows();
+//             for (int k = 0; k < K; k++) {
+//                 outerNormal2D = hPolys[L].block<1, 2>(k, 0);
+//                 violaPos = outerNormal2D.dot(pos) + hPolys[L](k, 2);
+//                 if (smoothedL1(violaPos, smoothFactor, violaPosPena, violaPosPenaD)) {
+//                     gradPos += weightPos * violaPosPenaD * outerNormal2D;
+//                     pena += weightPos * violaPosPena;
+//                 }
+//             }
+
+//             if (smoothedL1(violaVel, smoothFactor, violaVelPena, violaVelPenaD)) {
+//                 gradVel += weightVel * violaVelPenaD * 2.0 * vel;
+//                 pena += weightVel * violaVelPena;
+//             }
+
+//             if (smoothedL1(violaYawRate, smoothFactor, violaYawRatePena, violaYawRatePenaD)) {
+//                 gradYawRate += weightOmg * violaYawRatePenaD * 2.0 * yaw_rate;
+//                 pena += weightOmg * violaYawRatePena;
+//             }
+
+//             if (smoothedL1(violaThrust, smoothFactor, violaThrustPena, violaThrustPenaD)) {
+//                 gradThr += weightThrust * violaThrustPenaD * 2.0 * (thr - thrustMean);
+//                 pena += weightThrust * violaThrustPena;
+//             }
+
+//             // 2D backward 传播
+//             flatMap.backward(
+//                 gradPos,
+//                 gradVel,
+//                 gradThr,
+//                 psi,
+//                 gradYawRate,
+//                 totalGradPos,
+//                 totalGradVel,
+//                 totalGradAcc,
+//                 totalGradJer,
+//                 totalGradPsi,
+//                 totalGradPsiD
+//             );
+
+//             node = (j == 0 || j == integralResolution) ? 0.5 : 1.0;
+//             alpha = j * integralFrac;
+
+//             gradC.block<6, 2>(i * 6, 0) +=
+//                 (beta0 * totalGradPos.transpose() + beta1 * totalGradVel.transpose()
+//                  + beta2 * totalGradAcc.transpose() + beta3 * totalGradJer.transpose())
+//                 * node * step;
+
+//             gradT(i) += (totalGradPos.dot(vel) + totalGradVel.dot(acc)
+//                          + totalGradAcc.dot(Eigen::Vector2d(jer2D_x, jer2D_y)))
+//                     * alpha * node * step
+//                 + node * integralFrac * pena;
+
+//             cost += node * step * pena;
+//         }
+//     }
+
+//     return;
+// }

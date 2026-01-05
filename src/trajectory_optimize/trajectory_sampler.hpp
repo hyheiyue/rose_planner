@@ -172,7 +172,7 @@ inline std::vector<SampleTrajectoryPoint> sampleTrajectoryTrapezoid(
     auto k_map = computeOptimizedCurvatures(smooth);
 
     Eigen::Vector2d start_dir = (smooth[1] - smooth[0]).normalized();
-    double start_v = std::max(0.0, init_v.dot(start_dir));
+    double start_v = std::max(0.0, init_v.norm());
     double end_v = 0.0;
 
     auto v_profile = computeVelocityProfile(s_map, k_map, expected_vel, max_acc, start_v, end_v);

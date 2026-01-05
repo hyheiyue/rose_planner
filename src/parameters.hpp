@@ -21,12 +21,14 @@ public:
         double smooth_weight = 1.0;
         double obstacle_weight = 1.0;
         double time_weight = 1.0;
+        double base_scale = 1.0;
         void load(rclcpp::Node& node) {
             smooth_weight =
                 node.declare_parameter<double>("trajectory_opt.smooth_weight", smooth_weight);
             obstacle_weight =
                 node.declare_parameter<double>("trajectory_opt.obstacle_weight", obstacle_weight);
             time_weight = node.declare_parameter<double>("trajectory_opt.time_weight", time_weight);
+            base_scale = node.declare_parameter<double>("trajectory_opt.base_scale", base_scale);
         }
     } opt_params;
     struct MpcParams {
