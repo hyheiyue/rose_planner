@@ -6,22 +6,27 @@ rose_planner_node:
     robot_size: [0.2, 0.2]
     use_control_output: true
     dynamic_replan: false
+    default_wz: 3.14
     path_search:
       a_star: 
         clearance_weight: 2.0
         obstacle_penalty_weight: 10.0
         heuristic_weight: 1.0
       resampler:
-        max_vel: 4.0
+        max_vel: 3.0
         acc: 3.0
         dt: 0.1
     trajectory_opt:
-      smooth_weight: 3.0
-      obstacle_weight: 10.0
-      time_weight: 30.0
-      base_scale: 10000.0
+      smooth_weight: 1.0
+      obstacle_weight: 500.0
+      time_weight: 3.0
+      dynamic_weight: 3.0
+      base_scale: 1000.0
+      max_vel: 4.0
+      max_acc: 3.0
+      max_jerk: 15.0
     mpc_control:
-      dt: 0.01
+      dt: 0.02
       max_iter: 20
       predict_steps: 30
       max_speed: 3.0
@@ -58,7 +63,7 @@ rose_planner_node:
         origin2base: 0.2
         min_diff_z: 0.1
         min_block_count: 2
-        block_ratio: 0.15
+        block_ratio: 0.8
         kernel_size: 3
         dilate_iter: 1
         use_static_map: true

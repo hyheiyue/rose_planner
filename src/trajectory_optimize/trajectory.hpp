@@ -346,7 +346,6 @@ public:
         if (pieces.empty())
             return pts;
 
-        // 1. 计算合理的长度（用 double 计算避免 size_t overflow）
         double totalT = getTotalDuration();
         double n_est = 0.0;
 
@@ -354,18 +353,16 @@ public:
             n_est = std::ceil(totalT / dt) + 2;
         }
 
-        // 2. clamp 到安全范围，防止 vector::reserve 触发 std::length_error
         size_t N = 0;
         if (n_est > 0.0 && n_est < 1e7) {
             N = static_cast<size_t>(n_est);
         }
 
-        const size_t MAX_RESERVE = 5000; // 轨迹采样不可能需要更大
+        const size_t MAX_RESERVE = 5000;
         N = std::min(N, MAX_RESERVE);
 
-        pts.reserve(N); // ✔ 现在绝对安全
+        pts.reserve(N);
 
-        // 3. 采样
         for (int i = 0; i < getPieceNum(); ++i) {
             double T = pieces[i].getDuration();
             double t = 0.0;
@@ -375,7 +372,7 @@ public:
                 t += dt;
             }
 
-            pts.push_back(pieces[i].getPos(T)); // 终点兜底
+            pts.push_back(pieces[i].getPos(T));
         }
 
         return pts;
@@ -576,14 +573,13 @@ public:
         return feasible;
     }
     inline double getTimeByPos(const Eigen::Vector2d& pos, double eps = 1e-3) const {
-        const double phi = 0.6180339887498949; // 黄金比例
+        const double phi = 0.6180339887498949;
 
         double t_global = 0.0;
 
         for (int i = 0; i < getPieceNum(); i++) {
             double T = pieces[i].getDuration();
 
-            // 黄金分割搜索 τ ∈ [0, T]
             double left = 0.0;
             double right = T;
             double c = right - phi * (right - left);
@@ -626,8 +622,6 @@ public:
                     fc = (pd - pos).norm();
                 }
             }
-
-            // 结束后检查最优点是否足够接近
             if (dist_best < eps) {
                 return t_global + tau_best;
             }

@@ -23,6 +23,10 @@ public:
         w_obs = params_.opt_params.obstacle_weight * base_scale;
         w_smooth = params_.opt_params.smooth_weight * base_scale;
         w_time = params_.opt_params.time_weight * base_scale;
+        w_dyn = params_.opt_params.dynamic_weight * base_scale;
+        maxVel = params_.opt_params.max_vel;
+        maxAcc = params_.opt_params.max_acc;
+        maxJerk = params_.opt_params.max_jerk;
     }
     static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {
         return std::make_shared<TrajectoryOpt>(rose_map, params);
@@ -47,7 +51,7 @@ public:
         ctx_.sample_dt = sample_dt;
         ctx_.init_obs = true;
         Eigen::Matrix<double, 2, 3> headState;
-        init_v = (ctx_.path[1] - ctx_.path[0]).normalized()*init_v.norm();
+        init_v = (ctx_.path[1] - ctx_.path[0]).normalized() * init_v.norm();
         headState << ctx_.head_pos, init_v, Eigen::Vector2d::Zero();
         Eigen::Matrix<double, 2, 3> tailState;
         tailState << ctx_.tail_pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
@@ -125,7 +129,7 @@ public:
         x.segment(timeOffset, pieceNum) = virtualT;
         double minCost = 0.0;
         lbfgs_params_.mem_size = 256;
-        lbfgs_params_.past = 20;
+        lbfgs_params_.past = 5;
         lbfgs_params_.min_step = 1e-16;
         lbfgs_params_.g_epsilon = 2.0e-5;
         lbfgs_params_.delta = 2e-5;
@@ -146,26 +150,26 @@ public:
 
         if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
             //std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
+            for (int i = 0; i < ctrlNum; ++i) {
+                ctx_.path[i + 1].x() = x(i);
+                ctx_.path[i + 1].y() = x(i + ctrlNum);
+            }
+            Eigen::Matrix2Xd inPs(2, ctrlNum);
+            inPs.row(0) = x.head(ctrlNum).transpose();
+            inPs.row(1) = x.segment(ctrlNum, ctrlNum).transpose();
+
+            virtualT = x.segment(timeOffset, pieceNum);
+
+            VirtualT2RealT(virtualT, ctx_.inTimes);
+
+            minco_.setParameters(inPs, ctx_.inTimes);
+            minco_.getTrajectory(finalTraj_);
+            ctx_.pathInPs.resize(2, ctrlNum);
+            ctx_.pathInPs.row(0) = inPs.row(0);
+            ctx_.pathInPs.row(1) = inPs.row(1);
         } else {
             std::cout << "[Smooth Optimize] FAIL: " << lbfgs::lbfgs_strerror(ret) << std::endl;
         }
-        for (int i = 0; i < ctrlNum; ++i) {
-            ctx_.path[i + 1].x() = x(i);
-            ctx_.path[i + 1].y() = x(i + ctrlNum);
-        }
-        Eigen::Matrix2Xd inPs(2, ctrlNum);
-        inPs.row(0) = x.head(ctrlNum).transpose();
-        inPs.row(1) = x.segment(ctrlNum, ctrlNum).transpose();
-
-        virtualT = x.segment(timeOffset, pieceNum);
-
-        VirtualT2RealT(virtualT, ctx_.inTimes);
-
-        minco_.setParameters(inPs, ctx_.inTimes);
-        minco_.getTrajectory(finalTraj_);
-        ctx_.pathInPs.resize(2, ctrlNum);
-        ctx_.pathInPs.row(0) = inPs.row(0);
-        ctx_.pathInPs.row(1) = inPs.row(1);
     }
 
     static double cost(void* ptr, const Eigen::VectorXd& x, Eigen::VectorXd& g) {
@@ -228,17 +232,10 @@ public:
             gradByTimes,
             gradByTailStateS
         );
-        // gradByTimes += energyT_grad;
         cost_val += energy;
         gradp += energy_grad;
         gradp += gradByPoints;
-        for (int i = 0; i < points_num; ++i) {
-            double nearest_cost = 0.0;
-            Eigen::Vector2d x_cur = inPs.col(i);
-            Eigen::Vector2d obs_grad = instance->obstacleTerm(x_cur, nearest_cost);
-            cost_val += nearest_cost;
-            gradp.col(i) += obs_grad;
-        }
+        cost_val += instance->attachPenaltyFunctional(inPs, gradp);
         cost_val += instance->w_time * instance->ctx_.inTimes.sum();
         Eigen::VectorXd rhotimes;
         rhotimes.resize(gradByTimes.size());
@@ -267,6 +264,129 @@ public:
             return true;
         }
     }
+    static inline double kahanSum(double& sum, double& c, const double& val) {
+        double y = val - c;
+        double t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+        return sum;
+    }
+    double attachPenaltyFunctional(const Eigen::Matrix2Xd& inPs, Eigen::Matrix2Xd& gradp) {
+        const int N = inPs.cols();
+        if (N < 2)
+            return 0.0;
+
+        double cost_val = 0.0;
+        double c_cost = 0.0;
+
+        for (int i = 0; i < N - 1; i++) {
+            double nearest_cost = 0.0;
+            const Eigen::Vector2d& p0 = inPs.col(i);
+            const Eigen::Vector2d& p1 = inPs.col(i + 1);
+
+            // 1. Obstacle cost
+            Eigen::Vector2d obs_grad = obstacleTerm(p0, nearest_cost);
+            kahanSum(cost_val, c_cost, nearest_cost);
+            gradp.col(i).noalias() += obs_grad;
+
+            // 2. Safe dt
+            double dt = (i < ctx_.inTimes.size()) ? ctx_.inTimes[i] : 1e-3;
+            dt = std::max(dt, 1e-6);
+
+            // 3. Velocity penalty
+            Eigen::Vector2d v = (p1 - p0) / dt;
+            double vnorm = v.norm();
+            double vel_mu = 1e-2;
+            double vel_f = 0.0, vel_df = 0.0;
+            smoothedL1(vnorm - maxVel, vel_mu, vel_f, vel_df);
+            kahanSum(cost_val, c_cost, w_dyn * vel_f * vel_f);
+
+            if (vel_df > 1e-9 && vel_f > 1e-12) {
+                Eigen::Vector2d dir = Eigen::Vector2d::Zero();
+                if (vnorm > 1e-12) {
+                    dir = v.normalized();
+                }
+                double g = 2.0 * w_dyn * vel_f * vel_df;
+                gradp.col(i).noalias() += (-g * dir / dt);
+                gradp.col(i + 1).noalias() += (g * dir / dt);
+            }
+
+            // 4. Acceleration penalty
+            if (i + 2 < N) {
+                const Eigen::Vector2d& p2 = inPs.col(i + 2);
+
+                double dt1 = (i < ctx_.inTimes.size()) ? ctx_.inTimes[i] : dt;
+                double dt2 = (i + 1 < ctx_.inTimes.size()) ? ctx_.inTimes[i + 1] : dt;
+                dt1 = std::max(dt1, 1e-6);
+                dt2 = std::max(dt2, 1e-6);
+
+                Eigen::Vector2d v2 = (p2 - p1) / dt2;
+                double dt_avg = 0.5 * (dt1 + dt2);
+                dt_avg = std::max(dt_avg, 1e-6);
+
+                Eigen::Vector2d a = (v2 - v) / dt_avg;
+                double anorm = a.norm();
+
+                double acc_mu = 1e-2;
+                double acc_f = 0.0, acc_df = 0.0;
+                smoothedL1(anorm - maxAcc, acc_mu, acc_f, acc_df);
+                kahanSum(cost_val, c_cost, w_dyn * acc_f * acc_f);
+
+                if (acc_df > 1e-9 && acc_f > 1e-12) {
+                    Eigen::Vector2d dir = Eigen::Vector2d::Zero();
+                    if (anorm > 1e-12) {
+                        dir = a.normalized();
+                    }
+                    double g = 2.0 * w_dyn * acc_f * acc_df;
+                    double inv_dt_sq = 1.0 / (dt_avg * dt_avg);
+
+                    gradp.col(i).noalias() += (g * dir * inv_dt_sq);
+                    gradp.col(i + 1).noalias() += (-2.0 * g * dir * inv_dt_sq);
+                    gradp.col(i + 2).noalias() += (g * dir * inv_dt_sq);
+                }
+
+                // 5. Jerk penalty
+                if (i + 3 < N) {
+                    const Eigen::Vector2d& p3 = inPs.col(i + 3);
+                    const Eigen::Vector2d& p2_ref = inPs.col(i + 2);
+
+                    double dt3 = (i + 2 < ctx_.inTimes.size()) ? ctx_.inTimes[i + 2] : dt;
+                    dt3 = std::max(dt3, 1e-6);
+
+                    Eigen::Vector2d v3 = (p3 - p2_ref) / dt3;
+                    double dt2_avg = 0.5 * (dt2 + dt3);
+                    dt2_avg = std::max(dt2_avg, 1e-6);
+                    double dt_jerk = 0.5 * (dt_avg + dt2_avg);
+                    dt_jerk = std::max(dt_jerk, 1e-6);
+
+                    Eigen::Vector2d a2 = (v3 - v2) / dt2_avg;
+                    Eigen::Vector2d jerk = (a2 - a) / dt_jerk;
+                    double jnorm = jerk.norm();
+
+                    double jerk_mu = 1e-2;
+                    double jerk_f = 0.0, jerk_df = 0.0;
+                    smoothedL1(jnorm - maxJerk, jerk_mu, jerk_f, jerk_df);
+                    kahanSum(cost_val, c_cost, w_dyn * jerk_f * jerk_f);
+
+                    if (jerk_df > 1e-9 && jerk_f > 1e-12) {
+                        Eigen::Vector2d dir = Eigen::Vector2d::Zero();
+                        if (jnorm > 1e-12) {
+                            dir = jerk.normalized();
+                        }
+                        double g = 2.0 * w_dyn * jerk_f * jerk_df;
+                        double inv_dt_cube = 1.0 / (dt_jerk * dt_jerk * dt_jerk);
+
+                        gradp.col(i).noalias() += (-g * dir * inv_dt_cube);
+                        gradp.col(i + 1).noalias() += (3.0 * g * dir * inv_dt_cube);
+                        gradp.col(i + 2).noalias() += (-3.0 * g * dir * inv_dt_cube);
+                        gradp.col(i + 3).noalias() += (g * dir * inv_dt_cube);
+                    }
+                }
+            }
+        }
+
+        return cost_val;
+    }
 
     Eigen::Vector2d obstacleTerm(const Eigen::Vector2d& xcur, double& nearest_cost) {
         nearest_cost = 0.0;
@@ -286,7 +406,6 @@ public:
         }
 
         double penetration = R - d;
-
         double cost_s1 = 0.0, dcost_s1 = 0.0;
         if (!smoothedL1(penetration, mu, cost_s1, dcost_s1)) {
             return grad;
@@ -394,149 +513,10 @@ public:
     double w_obs = 1.0;
     double w_smooth = 1.0;
     double w_time = 1.0;
+    double w_dyn = 1.0;
+    double maxVel = 4.0;
+    double maxAcc = 3.0;
+    double maxJerk = 1.0;
 };
 
 } // namespace rose_planner
-// static inline void attachPenaltyFunctional(
-//     const Eigen::VectorXd& T,
-//     const Eigen::MatrixX2d&
-//         coeffs, // coeffs 仍是6×3分块，但只用前2列(x,y)，第3列yaw不再参与平坦映射
-//     const Eigen::VectorXi& hIdx,
-//     const PolyhedraH& hPolys,
-//     const double& smoothFactor,
-//     const int& integralResolution,
-//     const Eigen::VectorXd& magnitudeBounds,
-//     const Eigen::VectorXd& penaltyWeights,
-//     flatness::FlatnessMap2D&
-//         flatMap, // 你之后可以换成2D版本，但这里直接当成数学工具用，不再输出3D姿态
-//     double& cost,
-//     Eigen::VectorXd& gradT,
-//     Eigen::MatrixX2d& gradC
-// ) {
-//     const double velSqrMax = magnitudeBounds(0) * magnitudeBounds(0);
-//     const double omgSqrMax =
-//         magnitudeBounds(1) * magnitudeBounds(1); // 这里 omg 变成 yaw rate，依然可以用它做上界
-//     const double thrustMin = magnitudeBounds(2);
-//     const double thrustMax = magnitudeBounds(3);
-
-//     const double weightPos = penaltyWeights(0);
-//     const double weightVel = penaltyWeights(1);
-//     const double weightOmg = penaltyWeights(2);
-//     const double weightThrust = penaltyWeights(3);
-
-//     Eigen::Vector2d pos, vel, acc;
-//     Eigen::Vector2d totalGradPos, totalGradVel, totalGradAcc, totalGradJer;
-//     double totalGradPsi, totalGradPsiD;
-//     double thr;
-//     double yaw_rate; // 2D 角速度只保留 yaw
-//     double gradThr;
-//     double gradYawRate;
-//     Eigen::Vector2d gradPos, gradVel;
-//     double step, alpha;
-//     double s1, s2, s3, s4, s5;
-//     Eigen::Matrix<double, 6, 1> beta0, beta1, beta2, beta3;
-//     Eigen::Vector2d outerNormal2D;
-//     int K, L;
-//     double violaPos, violaVel, violaYawRate, violaThrust;
-//     double violaPosPenaD, violaVelPenaD, violaYawRatePenaD, violaThrustPenaD;
-//     double violaPosPena, violaVelPena, violaYawRatePena, violaThrustPena;
-//     double node, pena;
-
-//     const int pieceNum = T.size();
-//     const double integralFrac = 1.0 / integralResolution;
-
-//     for (int i = 0; i < pieceNum; i++) {
-//         const Eigen::Matrix<double, 6, 3>& c = coeffs.block<6, 3>(i * 6, 0);
-//         step = T(i) * integralFrac;
-
-//         for (int j = 0; j <= integralResolution; j++) {
-//             s1 = j * step;
-//             s2 = s1 * s1;
-//             s3 = s2 * s1;
-//             s4 = s2 * s2;
-//             s5 = s4 * s1;
-
-//             beta0 << 1.0, s1, s2, s3, s4, s5;
-//             beta1 << 0.0, 1.0, 2.0 * s1, 3.0 * s2, 4.0 * s3, 5.0 * s4;
-//             beta2 << 0.0, 0.0, 2.0, 6.0 * s1, 12.0 * s2, 20.0 * s3;
-//             beta3 << 0.0, 0.0, 0.0, 6.0, 24.0 * s1, 60.0 * s2;
-
-//             // 只计算 2D pos/vel/acc
-//             pos = c.block<2, 3>(0, 0).transpose() * beta0; // 取 (x,y) 多项式系数
-//             vel = c.block<2, 3>(0, 0).transpose() * beta1;
-//             acc = c.block<2, 3>(0, 0).transpose() * beta2;
-//             double jer2D_x = (c.block<2, 3>(0, 0).transpose() * beta3)(0);
-//             double jer2D_y = (c.block<2, 3>(0, 0).transpose() * beta3)(1);
-//             thr = massClamp(acc.norm(), thrustMin, thrustMax);
-//             yaw_rate = dpsi;
-
-//             violaVel = vel.squaredNorm() - velSqrMax;
-//             violaYawRate = yaw_rate * yaw_rate - omgSqrMax;
-//             violaThrust =
-//                 (thr < thrustMin ? thrustMin - thr : (thr > thrustMax ? thr - thrustMax : 0.0));
-
-//             gradThr = 0.0;
-//             gradYawRate = 0.0;
-//             gradPos.setZero(), gradVel.setZero();
-//             pena = 0.0;
-
-//             L = hIdx(i);
-//             K = hPolys[L].rows();
-//             for (int k = 0; k < K; k++) {
-//                 outerNormal2D = hPolys[L].block<1, 2>(k, 0);
-//                 violaPos = outerNormal2D.dot(pos) + hPolys[L](k, 2);
-//                 if (smoothedL1(violaPos, smoothFactor, violaPosPena, violaPosPenaD)) {
-//                     gradPos += weightPos * violaPosPenaD * outerNormal2D;
-//                     pena += weightPos * violaPosPena;
-//                 }
-//             }
-
-//             if (smoothedL1(violaVel, smoothFactor, violaVelPena, violaVelPenaD)) {
-//                 gradVel += weightVel * violaVelPenaD * 2.0 * vel;
-//                 pena += weightVel * violaVelPena;
-//             }
-
-//             if (smoothedL1(violaYawRate, smoothFactor, violaYawRatePena, violaYawRatePenaD)) {
-//                 gradYawRate += weightOmg * violaYawRatePenaD * 2.0 * yaw_rate;
-//                 pena += weightOmg * violaYawRatePena;
-//             }
-
-//             if (smoothedL1(violaThrust, smoothFactor, violaThrustPena, violaThrustPenaD)) {
-//                 gradThr += weightThrust * violaThrustPenaD * 2.0 * (thr - thrustMean);
-//                 pena += weightThrust * violaThrustPena;
-//             }
-
-//             // 2D backward 传播
-//             flatMap.backward(
-//                 gradPos,
-//                 gradVel,
-//                 gradThr,
-//                 psi,
-//                 gradYawRate,
-//                 totalGradPos,
-//                 totalGradVel,
-//                 totalGradAcc,
-//                 totalGradJer,
-//                 totalGradPsi,
-//                 totalGradPsiD
-//             );
-
-//             node = (j == 0 || j == integralResolution) ? 0.5 : 1.0;
-//             alpha = j * integralFrac;
-
-//             gradC.block<6, 2>(i * 6, 0) +=
-//                 (beta0 * totalGradPos.transpose() + beta1 * totalGradVel.transpose()
-//                  + beta2 * totalGradAcc.transpose() + beta3 * totalGradJer.transpose())
-//                 * node * step;
-
-//             gradT(i) += (totalGradPos.dot(vel) + totalGradVel.dot(acc)
-//                          + totalGradAcc.dot(Eigen::Vector2d(jer2D_x, jer2D_y)))
-//                     * alpha * node * step
-//                 + node * integralFrac * pena;
-
-//             cost += node * step * pena;
-//         }
-//     }
-
-//     return;
-// }

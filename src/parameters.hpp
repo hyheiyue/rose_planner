@@ -22,6 +22,10 @@ public:
         double obstacle_weight = 1.0;
         double time_weight = 1.0;
         double base_scale = 1.0;
+        double dynamic_weight = 1.0;
+        double max_vel = 4.0;
+        double max_acc = 3.0;
+        double max_jerk = 1.0;
         void load(rclcpp::Node& node) {
             smooth_weight =
                 node.declare_parameter<double>("trajectory_opt.smooth_weight", smooth_weight);
@@ -29,6 +33,11 @@ public:
                 node.declare_parameter<double>("trajectory_opt.obstacle_weight", obstacle_weight);
             time_weight = node.declare_parameter<double>("trajectory_opt.time_weight", time_weight);
             base_scale = node.declare_parameter<double>("trajectory_opt.base_scale", base_scale);
+            dynamic_weight =
+                node.declare_parameter<double>("trajectory_opt.dynamic_weight", dynamic_weight);
+            max_vel = node.declare_parameter<double>("trajectory_opt.max_vel", max_vel);
+            max_acc = node.declare_parameter<double>("trajectory_opt.max_acc", max_acc);
+            max_jerk = node.declare_parameter<double>("trajectory_opt.max_jerk", max_jerk);
         }
     } opt_params;
     struct MpcParams {

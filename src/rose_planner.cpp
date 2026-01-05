@@ -17,7 +17,7 @@ namespace rose_planner {
 struct RosePlanner::Impl {
 public:
     using SearchType = AStar;
-    constexpr static double default_wz = 0.0;
+    double default_wz = 0.0;
     ~Impl() {
         running_ = false;
         if (timer_thread_.joinable())
@@ -35,6 +35,7 @@ public:
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
         // mpc_ = AcadoMpc::create(parameters_);
         mpc_ = OsqpMpc::create(parameters_);
+        default_wz = node.declare_parameter<double>("default_wz", 0.0);
         target_frame_ = node.declare_parameter<std::string>("target_frame", "");
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
         odometry_sub_ = node.create_subscription<nav_msgs::msg::Odometry>(
@@ -92,6 +93,60 @@ public:
         Eigen::Vector2d v(current_odom_.twist.twist.linear.x, current_odom_.twist.twist.linear.y);
         return v;
     }
+    geometry_msgs::msg::PoseStamped getCurrentPose() {
+        geometry_msgs::msg::PoseStamped predicted_pose;
+        predicted_pose.header.stamp = node_->now();
+        predicted_pose.header.frame_id = current_odom_.header.frame_id;
+
+        double px = current_odom_.pose.pose.position.x;
+        double py = current_odom_.pose.pose.position.y;
+        double pz = current_odom_.pose.pose.position.z;
+
+        Eigen::Quaterniond q(
+            current_odom_.pose.pose.orientation.w,
+            current_odom_.pose.pose.orientation.x,
+            current_odom_.pose.pose.orientation.y,
+            current_odom_.pose.pose.orientation.z
+        );
+
+        Eigen::Vector3d v(
+            current_odom_.twist.twist.linear.x,
+            current_odom_.twist.twist.linear.y,
+            current_odom_.twist.twist.linear.z
+        );
+
+        Eigen::Vector3d w(
+            current_odom_.twist.twist.angular.x,
+            current_odom_.twist.twist.angular.y,
+            current_odom_.twist.twist.angular.z
+        );
+
+        static rclcpp::Time last_time = rclcpp::Time(current_odom_.header.stamp, RCL_ROS_TIME);
+        double dt = (node_->now() - last_time).seconds();
+        last_time = node_->now();
+        Eigen::Quaterniond dq = Eigen::Quaterniond(Eigen::AngleAxisd(
+            dt * w.norm(),
+            (w.norm() > 1e-6) ? w.normalized() : Eigen::Vector3d::UnitZ()
+        ));
+
+        Eigen::Quaterniond q_pred = q * dq;
+        q_pred.normalize();
+        Eigen::Vector3d p_pred(px, py, pz);
+        p_pred += v * dt;
+
+        // 赋值回 ROS2
+        predicted_pose.pose.position.x = p_pred.x();
+        predicted_pose.pose.position.y = p_pred.y();
+        predicted_pose.pose.position.z = p_pred.z();
+
+        predicted_pose.pose.orientation.w = q_pred.w();
+        predicted_pose.pose.orientation.x = q_pred.x();
+        predicted_pose.pose.orientation.y = q_pred.y();
+        predicted_pose.pose.orientation.z = q_pred.z();
+
+        return predicted_pose;
+    }
+
     void timerCallback() {
         static auto last_fps_time = node_->now();
         static int frame_count = 0;
@@ -157,7 +212,8 @@ public:
                     current_goal_.pose.position.x,
                     current_goal_.pose.position.y
                 );
-                Eigen::Vector2f current_pos(current_pose_.position.x, current_pose_.position.y);
+                auto current = getCurrentPose();
+                Eigen::Vector2f current_pos(current.pose.position.x, current.pose.position.y);
                 double dist_to_goal = (goal_pos - current_pos).norm();
 
                 if (dist_to_goal < 0.5) {
@@ -170,7 +226,10 @@ public:
                     replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
                     break;
                 }
-
+                if (!checkSafeTraj(current_traj_)) {
+                    searchOnce(goal_pos);
+                    break;
+                }
                 auto unsafe_points = checkSafePath(
                     current_traj_.toPointVector(parameters_.path_search_params_.resampler.dt)
                 );
@@ -216,8 +275,9 @@ public:
         mpc_->setTrajectory(current_traj_);
         Eigen::Vector2d start_v = getCurrentVel();
         MPCState now_state;
-        now_state.x = current_pose_.position.x;
-        now_state.y = current_pose_.position.y;
+        auto current = getCurrentPose();
+        now_state.x = current.pose.position.x;
+        now_state.y = current.pose.position.y;
         now_state.vx = start_v.x();
         now_state.vy = start_v.y();
         mpc_->setCurrent(now_state);
@@ -225,7 +285,7 @@ public:
         if (use_control_output_) {
             Eigen::VectorXd output = mpc_->getOutput();
 
-            double yaw = orientationToYaw(current_pose_.orientation);
+            double yaw = orientationToYaw(current.pose.orientation);
 
             double vx_world = output(0);
             double vy_world = output(1);
@@ -248,7 +308,7 @@ public:
             pose_msg.header = predict_path.header;
             pose_msg.pose.position.x = mpc_->xopt_[i].x;
             pose_msg.pose.position.y = mpc_->xopt_[i].y;
-            pose_msg.pose.position.z = current_pose_.position.z;
+            pose_msg.pose.position.z = current.pose.position.z;
             double yaw = std::hypot(mpc_->xopt_[i].vx, mpc_->xopt_[i].vy) > 1e-3
                 ? std::atan2(mpc_->xopt_[i].vy, mpc_->xopt_[i].vx)
                 : 0.0;
@@ -274,16 +334,27 @@ public:
         }
         return unsafe_points;
     }
+    bool checkSafeTraj(const TrajType& traj) {
+        auto sampled = traj.toPointVector(parameters_.path_search_params_.resampler.dt);
+        double total_length = 0.0;
+        for (int i = 0; i < sampled.size() - 1; ++i) {
+            total_length += segmentLength(sampled[i], sampled[i + 1]);
+        }
+        if (total_length > 100) {
+            RCLCPP_WARN(node_->get_logger(), "Traj too long, skipping.");
+            return false;
+        }
 
+        return true;
+    }
     void localReplan(const std::vector<int>& unsafe_points, const Eigen::Vector2f& goal_w) {
-        if (current_raw_path_.size() < 2 || current_traj_.getTotalDuration() < 1.0)
-        {
+        if (current_raw_path_.size() < 2 || current_traj_.getTotalDuration() < 1.0) {
             RCLCPP_WARN(node_->get_logger(), "Raw path too short for local replan.");
             return;
         }
-
+        auto current = getCurrentPose();
         const int Num = static_cast<int>(current_raw_path_.size());
-        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
+        Eigen::Vector2d start_w(current.pose.position.x, current.pose.position.y);
 
         int local_end_idx = unsafe_points.empty() ? findHeadPointIndex(start_w, current_raw_path_)
                                                   : unsafe_points.back();
@@ -414,7 +485,8 @@ public:
     }
 
     void searchOnce(const Eigen::Vector2f& goal_w) {
-        Eigen::Vector2d start_w(current_pose_.position.x, current_pose_.position.y);
+        auto current = getCurrentPose();
+        Eigen::Vector2d start_w(current.pose.position.x, current.pose.position.y);
 
         current_raw_path_.clear();
 
@@ -502,7 +574,7 @@ public:
                 pose_msg.header = raw_path_msg.header;
                 pose_msg.pose.position.x = traj[i].p.x();
                 pose_msg.pose.position.y = traj[i].p.y();
-                pose_msg.pose.position.z = current_pose_.position.z;
+                pose_msg.pose.position.z = getCurrentPose().pose.position.z;
 
                 double yaw = std::atan2(traj[i].v.y(), traj[i].v.x());
                 tf2::Quaternion q;
@@ -525,7 +597,7 @@ public:
 
         traj_opt_->optimize();
         auto opt_traj = traj_opt_->getTrajectory();
-        if (opt_traj.getPieceNum() > 1) {
+        if (opt_traj.getPieceNum() > 1 && opt_traj.getPieceNum() < 1000) {
             current_traj_ = opt_traj;
             have_traj_ = true;
         }
@@ -552,7 +624,7 @@ public:
                 p.header = opt_path_msg.header;
                 p.pose.position.x = pos.x();
                 p.pose.position.y = pos.y();
-                p.pose.position.z = current_pose_.position.z;
+                p.pose.position.z = getCurrentPose().pose.position.z;
 
                 tf2::Quaternion q;
                 q.setRPY(0, 0, yaw);
@@ -659,12 +731,12 @@ public:
         );
         p = T * p;
 
-        geometry_msgs::msg::Pose pose_out;
-        pose_out.position.x = p.x();
-        pose_out.position.y = p.y();
-        pose_out.position.z = p.z();
-        pose_out.orientation = tf2::toMsg(q_in);
-
+        geometry_msgs::msg::PoseStamped pose_out;
+        pose_out.pose.position.x = p.x();
+        pose_out.pose.position.y = p.y();
+        pose_out.pose.position.z = p.z();
+        pose_out.pose.orientation = tf2::toMsg(q_in);
+        pose_out.header = odom_in.header;
         current_pose_ = pose_out;
 
         tf2::Vector3 vlin(
@@ -719,7 +791,7 @@ public:
     rose_map::RoseMap::Ptr rose_map_;
     TrajectoryOpt::Ptr traj_opt_;
     bool dynamic_replan_ = false;
-    geometry_msgs::msg::Pose current_pose_;
+    geometry_msgs::msg::PoseStamped current_pose_;
     double last_yaw_;
     bool use_control_output_ = false;
     nav_msgs::msg::Odometry current_odom_;
