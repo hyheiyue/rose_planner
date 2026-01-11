@@ -23,6 +23,14 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
     int goal_idx = rose_map_->key2DToIndex2D(goal);
     if (start_idx < 0)
         return SearchState::NO_PATH;
+    bool goal_projected = false;
+    Eigen::Vector2f projected_goal_w;
+    if (goal_idx < 0) {
+        if (projectGoalToMapBoundary(start_w, goal_w, projected_goal_w)) {
+            goal_projected = true;
+            goal = rose_map_->worldToKey2D(projected_goal_w);
+        }
+    }
 
     Node sn;
     sn.key = start;
@@ -66,6 +74,9 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
             for (int id = cid; id >= 0; id = nodes_[id].parent) {
                 auto w = rose_map_->key2DToWorld(nodes_[id].key);
                 path.push_back({ w.x(), w.y() });
+            }
+            if (goal_projected) {
+                path.push_back({ goal_w.x(), goal_w.y() });
             }
             std::reverse(path.begin(), path.end());
             return SearchState::SUCCESS;

@@ -61,7 +61,6 @@ public:
             ctx_.pieceNum,
             Eigen::Vector2d(w_smooth, w_smooth)
         );
-        minco_.getTrajectory(finalTraj_);
     }
     template<typename EIGENVEC>
     inline void RealT2VirtualT(const Eigen::VectorXd& RT, EIGENVEC& VT) {
@@ -120,7 +119,7 @@ public:
 
         ctx_.inTimes.resize(pieceNum);
         for (int i = 0; i < pieceNum; ++i) {
-            ctx_.inTimes(i) = ctx_.sample_dt + 1e-3 * (i % 2);
+            ctx_.inTimes(i) = ctx_.sample_dt;
         }
 
         Eigen::VectorXd virtualT(pieceNum);
@@ -129,10 +128,10 @@ public:
         x.segment(timeOffset, pieceNum) = virtualT;
         double minCost = 0.0;
         lbfgs_params_.mem_size = 256;
-        lbfgs_params_.past = 5;
-        lbfgs_params_.min_step = 1e-16;
-        lbfgs_params_.g_epsilon = 2.0e-5;
-        lbfgs_params_.delta = 2e-5;
+        lbfgs_params_.past = 20;
+        lbfgs_params_.min_step = 1e-32;
+        lbfgs_params_.g_epsilon = 2.0e-7;
+        lbfgs_params_.delta = 2e-7;
         lbfgs_params_.max_iterations = 4000;
         lbfgs_params_.max_linesearch = 32;
         lbfgs_params_.f_dec_coeff = 1e-4;
@@ -149,7 +148,7 @@ public:
         );
 
         if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
-            //std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
+            // std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
             for (int i = 0; i < ctrlNum; ++i) {
                 ctx_.path[i + 1].x() = x(i);
                 ctx_.path[i + 1].y() = x(i + ctrlNum);
@@ -164,9 +163,6 @@ public:
 
             minco_.setParameters(inPs, ctx_.inTimes);
             minco_.getTrajectory(finalTraj_);
-            ctx_.pathInPs.resize(2, ctrlNum);
-            ctx_.pathInPs.row(0) = inPs.row(0);
-            ctx_.pathInPs.row(1) = inPs.row(1);
         } else {
             std::cout << "[Smooth Optimize] FAIL: " << lbfgs::lbfgs_strerror(ret) << std::endl;
         }
@@ -497,7 +493,6 @@ public:
         std::vector<Eigen::Vector2d> path;
         Eigen::Vector2d head_pos;
         Eigen::Vector2d tail_pos;
-        Eigen::Matrix2Xd pathInPs;
         Eigen::VectorXd inTimes;
         int pieceNum = 0;
         double sample_dt = 0.0;

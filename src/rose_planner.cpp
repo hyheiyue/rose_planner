@@ -10,6 +10,7 @@
 #include <angles.h>
 // #include <mpc_control/acado_mpc.hpp>
 #include "mpc_control/osqp_mpc.hpp"
+#include "mpc_control/qpoases_mpc.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -17,6 +18,7 @@ namespace rose_planner {
 struct RosePlanner::Impl {
 public:
     using SearchType = AStar;
+    using MpcType = OsqpMpc;
     double default_wz = 0.0;
     ~Impl() {
         running_ = false;
@@ -34,7 +36,7 @@ public:
         path_search_ = SearchType::create(rose_map_, parameters_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
         // mpc_ = AcadoMpc::create(parameters_);
-        mpc_ = OsqpMpc::create(parameters_);
+        mpc_ = MpcType::create(parameters_);
         default_wz = node.declare_parameter<double>("default_wz", 0.0);
         target_frame_ = node.declare_parameter<std::string>("target_frame", "");
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
@@ -803,7 +805,7 @@ public:
     std::thread control_timer_thread_;
     std::atomic<bool> running_ { true };
     // AcadoMpc::Ptr mpc_;
-    OsqpMpc::Ptr mpc_;
+    MpcType::Ptr mpc_;
     bool have_traj_ = false;
     TrajType current_traj_;
     std::vector<Eigen::Vector2d> current_raw_path_;

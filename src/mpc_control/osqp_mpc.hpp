@@ -6,6 +6,7 @@
 //clang-format on
 #include "angles.h"
 #include "common.hpp"
+#include "mpc_common.hpp"
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <chrono>
@@ -13,25 +14,8 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+
 namespace rose_planner {
-
-class MPCState {
-public:
-    double x = 0;
-    double y = 0;
-    double vx = 0;
-    double vy = 0;
-};
-
-class TrajPoint {
-public:
-    double x = 0;
-    double y = 0;
-    double vx = 0;
-    double vy = 0;
-    double ax = 0;
-    double ay = 0;
-};
 
 class OsqpMpc {
 public:
@@ -426,7 +410,6 @@ public:
             return;
         }
 
-        // 结果写回
         for (int i = 0; i < steps; i++) {
             int ui = dimx + 2 * i;
             output_(0, i + delay_num_) = sol[ui];

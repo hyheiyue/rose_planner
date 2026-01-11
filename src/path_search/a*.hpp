@@ -76,6 +76,39 @@ private:
                 succ.push_back(nb);
         }
     }
+    bool projectGoalToMapBoundary(
+        const Eigen::Vector2f& start_w,
+        const Eigen::Vector2f& goal_w,
+        Eigen::Vector2f& projected_goal_w
+    ) const {
+        Eigen::Vector2f dir = goal_w - start_w;
+        float len = dir.norm();
+        if (len < 1e-3f)
+            return false;
+
+        dir /= len;
+
+        // 步长：1/2 个 voxel
+        float step = 0.5f * rose_map_->acc_map_info_.voxel_size_;
+        float t = 0.0f;
+
+        Eigen::Vector2f last_inside = start_w;
+
+        while (t <= len) {
+            Eigen::Vector2f p = start_w + dir * t;
+            auto key = rose_map_->worldToKey2D(p);
+            int idx = rose_map_->key2DToIndex2D(key);
+            if (idx < 0) {
+                projected_goal_w = last_inside;
+                return true;
+            }
+            last_inside = p;
+            t += step;
+        }
+
+        projected_goal_w = goal_w;
+        return true;
+    }
 };
 
 } // namespace rose_planner
