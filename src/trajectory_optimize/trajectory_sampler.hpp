@@ -63,43 +63,9 @@ resamplePath(const std::vector<Eigen::Vector2d>& path, double step = 0.05) {
     return resampled;
 }
 
-inline std::vector<double> computeOptimizedCurvatures(const std::vector<Eigen::Vector2d>& path) {
-    size_t n = path.size();
-    std::vector<double> kappa(n, 0.0);
-    if (n < 5)
-        return kappa;
-
-    for (int i = 0; i < (int)n; ++i) {
-        int start = std::max(0, i - 2);
-        int end = std::min((int)n - 1, i + 2);
-        int m = end - start + 1;
-
-        Eigen::Vector2d p_ref = path[i];
-        Eigen::MatrixXd A(m, 3);
-        Eigen::VectorXd B(m);
-
-        for (int j = start; j <= end; ++j) {
-            double dx = path[j].x() - p_ref.x();
-            double dy = path[j].y() - p_ref.y();
-            int row = j - start;
-            A(row, 0) = dx * dx;
-            A(row, 1) = dx;
-            A(row, 2) = 1.0;
-            B(row) = dy;
-        }
-
-        Eigen::Vector3d c = A.colPivHouseholderQr().solve(B);
-        double a = c[0];
-        double b = c[1];
-        double denom = std::pow(1.0 + b * b, 1.5);
-        kappa[i] = std::abs(2.0 * a) / std::max(denom, 1e-6);
-    }
-    return kappa;
-}
 
 inline std::vector<double> computeVelocityProfile(
     const std::vector<double>& s,
-    const std::vector<double>& kappa,
     double expected_vel,
     double max_acc,
     double start_v,
@@ -123,13 +89,9 @@ inline std::vector<double> computeVelocityProfile(
         double ds = s[i + 1] - s[i];
         double dv = max_acc * std::sqrt(ds);
         v[i] = std::min(expected_vel, v[i + 1] + dv);
+        v[i] = std::max(v[i], 1.0);
     }
 
-    for (size_t i = 0; i < n; i++) {
-        double k = kappa[i];
-        double soft_factor = 1.0 / (1.0 + 2.0 * k); // k 越大 factor 越小，但不会降到 0
-        v[i] = expected_vel * (1.0 - 0.7 * (1.0 - soft_factor)); // 80%~100% 贴近参考速度
-    }
 
     return v;
 }
@@ -145,13 +107,12 @@ inline std::vector<SampleTrajectoryPoint> sampleTrajectoryTrapezoid(
         return {};
     auto smooth = resamplePath(path, 0.05);
     auto s_map = computeArcLengths(smooth);
-    auto k_map = computeOptimizedCurvatures(smooth);
 
     Eigen::Vector2d start_dir = (smooth[1] - smooth[0]).normalized();
-    double start_v = std::max(0.0, init_v.norm());
+    double start_v = std::max(1.0, init_v.norm());
     double end_v = 0.0;
 
-    auto v_profile = computeVelocityProfile(s_map, k_map, expected_vel, max_acc, start_v, end_v);
+    auto v_profile = computeVelocityProfile(s_map, expected_vel, max_acc, start_v, end_v);
 
     std::vector<SampleTrajectoryPoint> traj;
     double t = 0.0, s_now = 0.0, s_total = s_map.back();
@@ -167,7 +128,6 @@ inline std::vector<SampleTrajectoryPoint> sampleTrajectoryTrapezoid(
 
         double v_cmd = v_profile[i];
 
-        // 让速度变化更温和，而不是直接 sqrt 限制
         if (!traj.empty()) {
             double v_prev = traj.back().v.norm();
             double dv = max_acc * dt;
@@ -179,8 +139,6 @@ inline std::vector<SampleTrajectoryPoint> sampleTrajectoryTrapezoid(
         Eigen::Vector2d dir = (p2 - p).normalized();
 
         traj.push_back({ p, dir * v_cmd, t });
-
-        // 这里直接用当前速度积分推进 s，而不是用速度上限推进
         s_now += v_cmd * dt;
         t += dt;
 

@@ -228,17 +228,26 @@ public:
                     replan_fsm_.state_ = ReplanFSM::WAIT_GOAL;
                     break;
                 }
+                removeOldTraj();
+                removeOldPath();
                 if (!checkSafeTraj(current_traj_)) {
                     searchOnce(goal_pos);
                     break;
                 }
-                auto unsafe_points = checkSafePath(
-                    current_traj_.toPointVector(parameters_.path_search_params_.resampler.dt)
-                );
+                auto unsafe_points = checkSafePath(current_raw_path_);
                 if (dynamic_replan_) {
                     searchOnce(goal_pos);
                 } else {
-                    localReplan(unsafe_points, goal_pos);
+                    if (!unsafe_points.empty()) {
+                        localReplan(unsafe_points, goal_pos);
+                    } else {
+                        unsafe_points = checkSafePath(current_traj_.toPointVector(0.05));
+                        if (!unsafe_points.empty()
+                            && current_raw_path_.size()
+                                > (1 / rose_map_->acc_map_info_.voxel_size_)) {
+                            resampleAndOpt(current_raw_path_);
+                        }
+                    }
                 }
 
                 break;
@@ -257,6 +266,43 @@ public:
             }
         }
     }
+    void removeOldTraj() {
+        auto current = getCurrentPose();
+        double t_cur =
+            current_traj_.getTimeByPos({ current.pose.position.x, current.pose.position.y }, 0.5);
+        if (t_cur < 0) {
+            replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
+            return;
+        }
+        current_traj_.truncateBeforeTime(t_cur);
+    }
+    void removeOldPath() {
+        if (current_raw_path_.empty())
+            return;
+
+        auto current = getCurrentPose();
+
+        int best_target_index = -1;
+        double best_dist2 = std::numeric_limits<double>::infinity();
+
+        for (int i = 0; i < static_cast<int>(current_raw_path_.size()); ++i) {
+            double dx = current_raw_path_[i].x() - current.pose.position.x;
+            double dy = current_raw_path_[i].y() - current.pose.position.y;
+            double dist2 = dx * dx + dy * dy;
+
+            if (dist2 < best_dist2) {
+                best_dist2 = dist2;
+                best_target_index = i;
+            }
+        }
+        if (best_target_index > 0) {
+            current_raw_path_.erase(
+                current_raw_path_.begin(),
+                current_raw_path_.begin() + best_target_index
+            );
+        }
+    }
+
     double orientationToYaw(const geometry_msgs::msg::Quaternion& q) noexcept {
         // Get armor yaw
         tf2::Quaternion tf_q;
@@ -325,17 +371,44 @@ public:
 
     std::vector<int> checkSafePath(const std::vector<Eigen::Vector2d>& path) {
         std::vector<int> unsafe_points;
-        for (int i = 0; i < path.size(); ++i) {
-            auto key = rose_map_->worldToKey2D(path[i].cast<float>());
-            int idx = rose_map_->key2DToIndex2D(key);
-            if (idx < 0)
-                continue;
-            if (rose_map_->esdf_[idx] < parameters_.robot_radius) {
+        if (path.size() < 2)
+            return unsafe_points;
+
+        const double step =
+            std::min(rose_map_->acc_map_info_.voxel_size_ * 0.5, parameters_.robot_radius * 0.5);
+
+        for (int i = 0; i + 1 < path.size(); ++i) {
+            const Eigen::Vector2d& p0 = path[i];
+            const Eigen::Vector2d& p1 = path[i + 1];
+
+            const double seg_len = (p1 - p0).norm();
+            const int n = std::max(1, static_cast<int>(std::ceil(seg_len / step)));
+
+            bool unsafe = false;
+
+            for (int k = 0; k <= n; ++k) {
+                double alpha = static_cast<double>(k) / n;
+                Eigen::Vector2d p = p0 + alpha * (p1 - p0);
+
+                auto key = rose_map_->worldToKey2D(p.cast<float>());
+                int idx = rose_map_->key2DToIndex2D(key);
+                if (idx < 0)
+                    continue;
+
+                if (rose_map_->esdf_[idx] < parameters_.robot_radius) {
+                    unsafe = true;
+                    break;
+                }
+            }
+
+            if (unsafe) {
                 unsafe_points.push_back(i);
             }
         }
+
         return unsafe_points;
     }
+
     bool checkSafeTraj(const TrajType& traj) {
         auto sampled = traj.toPointVector(parameters_.path_search_params_.resampler.dt);
         double total_length = 0.0;
@@ -358,8 +431,9 @@ public:
         const int Num = static_cast<int>(current_raw_path_.size());
         Eigen::Vector2d start_w(current.pose.position.x, current.pose.position.y);
 
-        int local_end_idx = unsafe_points.empty() ? findHeadPointIndex(start_w, current_raw_path_)
-                                                  : unsafe_points.back();
+        int local_end_idx = unsafe_points.empty()
+            ? findHeadPointIndex(start_w, current_raw_path_)
+            : unsafe_points.back() + (1 / rose_map_->acc_map_info_.voxel_size_);
 
         local_end_idx = std::clamp(local_end_idx, 0, Num - 1);
 

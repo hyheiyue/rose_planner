@@ -3,7 +3,7 @@ rose_planner_node:
     odom_topic: /Odometry
     goal_topic: /rose_goal
     target_frame: map
-    robot_size: [0.2, 0.2]
+    robot_size: [0.3, 0.3]
     use_control_output: true
     dynamic_replan: false
     default_wz: 3.14
@@ -17,20 +17,16 @@ rose_planner_node:
         acc: 3.0
         dt: 0.1
     trajectory_opt:
-      smooth_weight: 1.0
-      obstacle_weight: 500.0
-      time_weight: 3.0
-      dynamic_weight: 3.0
-      base_scale: 1000.0
-      max_vel: 4.0
-      max_acc: 3.0
-      max_jerk: 15.0
+      smooth_weight: 3.0
+      obstacle_weight: 700.0
+      time_weight: 30.0
+      base_scale: 100.0
     mpc_control:
-      dt: 0.02
+      dt: 0.03
       max_iter: 20
       predict_steps: 30
       max_speed: 3.0
-      min_speed: 0.2
+      min_speed: 1.0
       max_accel: 2.0
       delay_num: 0
       Q: [150.0,150.0,0.1,0.1]
@@ -52,18 +48,18 @@ rose_planner_node:
         log_max: 10.0
         occ_th: 0.0       
         min_shift: 2
-        timeout: 1.5
+        timeout: 15.5
         unknown_is_occupied: false
         use_ray: true
         max_ray_range: 20.0
       acc_map:
         origin: [0.0, 0.0]
-        size: [12.0, 12.0]
+        size: [17.0, 17.0]
         voxel_size: 0.05
         origin2base: 0.2
-        min_diff_z: 0.1
+        min_diff_z: 0.05
         min_block_count: 2
-        block_ratio: 0.8
+        block_ratio: 0.15
         kernel_size: 3
         dilate_iter: 1
         use_static_map: true

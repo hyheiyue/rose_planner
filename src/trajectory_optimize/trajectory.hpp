@@ -320,6 +320,40 @@ public:
             return RootFinder::countRoots(coeff, 0.0, 1.0) == 0;
         }
     }
+    static double binomialCoeff(int n, int k) {
+        if (k < 0 || k > n)
+            return 0.0;
+        if (k == 0 || k == n)
+            return 1.0;
+        double res = 1.0;
+        for (int i = 1; i <= k; ++i) {
+            res *= (n - (k - i));
+            res /= i;
+        }
+        return res;
+    }
+
+    static CoefficientMat shiftCoeffMat(const CoefficientMat& cMat, double t0) {
+        CoefficientMat newMat;
+        newMat.setZero();
+
+        for (int i = 0; i <= D; ++i) {
+            int n = D - i;
+            const auto& ci = cMat.col(i);
+
+            double t0_pow = 1.0;
+            for (int j = n; j >= 0; --j) {
+                int idx = D - j;
+                newMat.col(idx) += ci * binomialCoeff(n, j) * t0_pow;
+                t0_pow *= t0;
+            }
+        }
+        return newMat;
+    }
+
+    inline Piece shift(double t0) const {
+        return Piece(duration - t0, shiftCoeffMat(coeffMat, t0));
+    }
 };
 
 template<int D, int Freedom>
@@ -630,5 +664,86 @@ public:
         }
 
         return -1.0; // 全轨迹未找到
+    }
+    inline std::vector<Eigen::Vector2d>
+    toPointVectorBySpacing(double ds, double dt_search = 0.01) const {
+        std::vector<Eigen::Vector2d> pts;
+
+        if (pieces.empty() || ds <= 1e-6 || dt_search <= 1e-6)
+            return pts;
+
+        const double totalT = getTotalDuration();
+        if (totalT <= 0.0 || !std::isfinite(totalT))
+            return pts;
+
+        pts.reserve(2000); // 合理上限，避免频繁扩容
+
+        double t = 0.0;
+        Eigen::Vector2d last_pt = getPos(0.0);
+        pts.push_back(last_pt);
+
+        double acc_dist = 0.0;
+
+        while (t < totalT) {
+            t += dt_search;
+            if (t > totalT)
+                t = totalT;
+
+            Eigen::Vector2d cur_pt = getPos(t);
+            double d = (cur_pt - last_pt).norm();
+            acc_dist += d;
+
+            if (acc_dist >= ds) {
+                pts.push_back(cur_pt);
+                acc_dist = 0.0;
+            }
+
+            last_pt = cur_pt;
+        }
+
+        // 保证末端点一定被加入
+        Eigen::Vector2d end_pt = getPos(totalT);
+        if (pts.empty() || (pts.back() - end_pt).norm() > 1e-6) {
+            pts.push_back(end_pt);
+        }
+
+        return pts;
+    }
+    inline void truncateBeforeTime(double t) {
+        if (pieces.empty())
+            return;
+
+        if (t <= 0.0)
+            return;
+
+        double totalT = getTotalDuration();
+        if (t >= totalT) {
+            pieces.clear();
+            return;
+        }
+
+        double local_t = t;
+        int idx = locatePieceIdx(local_t);
+
+        Pieces new_pieces;
+        new_pieces.reserve(pieces.size() - idx);
+
+        const Piece<D, Freedom>& old_piece = pieces[idx];
+        const double old_T = old_piece.getDuration();
+        const double new_T = old_T - local_t;
+
+        Eigen::VectorXd p0 = old_piece.getPos(local_t);
+        Eigen::VectorXd v0 = old_piece.getVel(local_t);
+        Eigen::VectorXd a0 = old_piece.getAcc(local_t);
+        typename Piece<D, Freedom>::CoefficientMat new_cMat = old_piece.getCoeffMat();
+
+        new_cMat = Piece<D, Freedom>::shiftCoeffMat(new_cMat, local_t);
+
+        new_pieces.emplace_back(new_T, new_cMat);
+        for (int i = idx + 1; i < pieces.size(); ++i) {
+            new_pieces.push_back(pieces[i]);
+        }
+
+        pieces.swap(new_pieces);
     }
 };

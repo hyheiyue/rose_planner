@@ -23,10 +23,6 @@ public:
         w_obs = params_.opt_params.obstacle_weight * base_scale;
         w_smooth = params_.opt_params.smooth_weight * base_scale;
         w_time = params_.opt_params.time_weight * base_scale;
-        w_dyn = params_.opt_params.dynamic_weight * base_scale;
-        maxVel = params_.opt_params.max_vel;
-        maxAcc = params_.opt_params.max_acc;
-        maxJerk = params_.opt_params.max_jerk;
     }
     static Ptr create(rose_map::RoseMap::Ptr rose_map, Parameters params) {
         return std::make_shared<TrajectoryOpt>(rose_map, params);
@@ -285,100 +281,6 @@ public:
             kahanSum(cost_val, c_cost, nearest_cost);
             gradp.col(i).noalias() += obs_grad;
 
-            // 2. Safe dt
-            double dt = (i < ctx_.inTimes.size()) ? ctx_.inTimes[i] : 1e-3;
-            dt = std::max(dt, 1e-6);
-
-            // 3. Velocity penalty
-            Eigen::Vector2d v = (p1 - p0) / dt;
-            double vnorm = v.norm();
-            double vel_mu = 1e-2;
-            double vel_f = 0.0, vel_df = 0.0;
-            smoothedL1(vnorm - maxVel, vel_mu, vel_f, vel_df);
-            kahanSum(cost_val, c_cost, w_dyn * vel_f * vel_f);
-
-            if (vel_df > 1e-9 && vel_f > 1e-12) {
-                Eigen::Vector2d dir = Eigen::Vector2d::Zero();
-                if (vnorm > 1e-12) {
-                    dir = v.normalized();
-                }
-                double g = 2.0 * w_dyn * vel_f * vel_df;
-                gradp.col(i).noalias() += (-g * dir / dt);
-                gradp.col(i + 1).noalias() += (g * dir / dt);
-            }
-
-            // 4. Acceleration penalty
-            if (i + 2 < N) {
-                const Eigen::Vector2d& p2 = inPs.col(i + 2);
-
-                double dt1 = (i < ctx_.inTimes.size()) ? ctx_.inTimes[i] : dt;
-                double dt2 = (i + 1 < ctx_.inTimes.size()) ? ctx_.inTimes[i + 1] : dt;
-                dt1 = std::max(dt1, 1e-6);
-                dt2 = std::max(dt2, 1e-6);
-
-                Eigen::Vector2d v2 = (p2 - p1) / dt2;
-                double dt_avg = 0.5 * (dt1 + dt2);
-                dt_avg = std::max(dt_avg, 1e-6);
-
-                Eigen::Vector2d a = (v2 - v) / dt_avg;
-                double anorm = a.norm();
-
-                double acc_mu = 1e-2;
-                double acc_f = 0.0, acc_df = 0.0;
-                smoothedL1(anorm - maxAcc, acc_mu, acc_f, acc_df);
-                kahanSum(cost_val, c_cost, w_dyn * acc_f * acc_f);
-
-                if (acc_df > 1e-9 && acc_f > 1e-12) {
-                    Eigen::Vector2d dir = Eigen::Vector2d::Zero();
-                    if (anorm > 1e-12) {
-                        dir = a.normalized();
-                    }
-                    double g = 2.0 * w_dyn * acc_f * acc_df;
-                    double inv_dt_sq = 1.0 / (dt_avg * dt_avg);
-
-                    gradp.col(i).noalias() += (g * dir * inv_dt_sq);
-                    gradp.col(i + 1).noalias() += (-2.0 * g * dir * inv_dt_sq);
-                    gradp.col(i + 2).noalias() += (g * dir * inv_dt_sq);
-                }
-
-                // 5. Jerk penalty
-                if (i + 3 < N) {
-                    const Eigen::Vector2d& p3 = inPs.col(i + 3);
-                    const Eigen::Vector2d& p2_ref = inPs.col(i + 2);
-
-                    double dt3 = (i + 2 < ctx_.inTimes.size()) ? ctx_.inTimes[i + 2] : dt;
-                    dt3 = std::max(dt3, 1e-6);
-
-                    Eigen::Vector2d v3 = (p3 - p2_ref) / dt3;
-                    double dt2_avg = 0.5 * (dt2 + dt3);
-                    dt2_avg = std::max(dt2_avg, 1e-6);
-                    double dt_jerk = 0.5 * (dt_avg + dt2_avg);
-                    dt_jerk = std::max(dt_jerk, 1e-6);
-
-                    Eigen::Vector2d a2 = (v3 - v2) / dt2_avg;
-                    Eigen::Vector2d jerk = (a2 - a) / dt_jerk;
-                    double jnorm = jerk.norm();
-
-                    double jerk_mu = 1e-2;
-                    double jerk_f = 0.0, jerk_df = 0.0;
-                    smoothedL1(jnorm - maxJerk, jerk_mu, jerk_f, jerk_df);
-                    kahanSum(cost_val, c_cost, w_dyn * jerk_f * jerk_f);
-
-                    if (jerk_df > 1e-9 && jerk_f > 1e-12) {
-                        Eigen::Vector2d dir = Eigen::Vector2d::Zero();
-                        if (jnorm > 1e-12) {
-                            dir = jerk.normalized();
-                        }
-                        double g = 2.0 * w_dyn * jerk_f * jerk_df;
-                        double inv_dt_cube = 1.0 / (dt_jerk * dt_jerk * dt_jerk);
-
-                        gradp.col(i).noalias() += (-g * dir * inv_dt_cube);
-                        gradp.col(i + 1).noalias() += (3.0 * g * dir * inv_dt_cube);
-                        gradp.col(i + 2).noalias() += (-3.0 * g * dir * inv_dt_cube);
-                        gradp.col(i + 3).noalias() += (g * dir * inv_dt_cube);
-                    }
-                }
-            }
         }
 
         return cost_val;
@@ -407,7 +309,7 @@ public:
             return grad;
         }
 
-        double safe_margin = params_.robot_radius + 0.1;
+        double safe_margin = params_.robot_radius *2;
         double w_safe = 1.0;
         if (d < safe_margin) {
             w_safe += 4.0 * (safe_margin - d) / safe_margin;
@@ -508,10 +410,6 @@ public:
     double w_obs = 1.0;
     double w_smooth = 1.0;
     double w_time = 1.0;
-    double w_dyn = 1.0;
-    double maxVel = 4.0;
-    double maxAcc = 3.0;
-    double maxJerk = 1.0;
 };
 
 } // namespace rose_planner

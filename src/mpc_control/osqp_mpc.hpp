@@ -65,14 +65,13 @@ public:
             std::cerr << "[MPC] Warning: delay_num out of range\n";
             return cmd;
         }
-
+        
         cmd[0] = output_(0, delay_num_);
         cmd[1] = output_(1, delay_num_);
         return cmd;
     }
 
     void solve() {
-        auto t0 = std::chrono::system_clock::now();
 
         P_.clear();
         getRefPoints(T_, dt_);
@@ -88,11 +87,6 @@ public:
         }
 
         getCmd();
-
-        auto t1 = std::chrono::system_clock::now();
-        // std::cout << "[MPC] solve time: "
-        //           << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count()
-        //           << "ms\n";
     }
 
     void getRefPoints(const int T_in, double dt_in) {
@@ -108,8 +102,8 @@ private:
         if (t_cur < 0)
             t_cur = 0;
 
-        Eigen::Vector2d pos_end = traj_.getPos(traj_duration_ - 0.01);
-
+        Eigen::Vector2d pos_end;
+        Eigen::Vector2d vel_end;
         TrajPoint tp;
         int j = 0;
 
@@ -117,6 +111,9 @@ private:
             if (t <= traj_duration_) {
                 Eigen::Vector2d pos = traj_.getPos(t);
                 Eigen::Vector2d vel = traj_.getVel(t);
+                pos_end = pos;
+                // vel = vel.normalized() * std::max(vel.norm(), min_speed_);
+                vel_end = vel;
                 Eigen::Vector2d acc = traj_.getAcc(t);
                 tp.x = pos.x();
                 tp.y = pos.y();
@@ -127,8 +124,8 @@ private:
             } else {
                 tp.x = pos_end.x();
                 tp.y = pos_end.y();
-                tp.vx = 0;
-                tp.vy = 0;
+                tp.vx = vel_end.x();
+                tp.vy = vel_end.y();
                 tp.ax = 0;
                 tp.ay = 0;
             }
@@ -381,7 +378,6 @@ public:
             solver_initialized_ = true;
         }
 
-        // 更新求解
         bool hessian_bad = false;
         for (int k = 0; k < qp_hessian_.outerSize(); ++k) {
             for (Eigen::SparseMatrix<double>::InnerIterator it(qp_hessian_, k); it; ++it) {
