@@ -366,8 +366,7 @@ public:
         int next_idx = local_end_idx + 1;
         if (next_idx >= Num) {
             RCLCPP_WARN(node_->get_logger(), "Local replan end is last point, skipping.");
-            replan_fsm_.state_ = ReplanFSM::STATE::WAIT_GOAL;
-            change_to_wait_ = true;
+            replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
             return;
         }
 

@@ -71,14 +71,17 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
         // goal reached
         if (nodes_[cid].key == goal) {
             path.clear();
+
             for (int id = cid; id >= 0; id = nodes_[id].parent) {
                 auto w = rose_map_->key2DToWorld(nodes_[id].key);
                 path.push_back({ w.x(), w.y() });
             }
+
+            std::reverse(path.begin(), path.end());
             if (goal_projected) {
                 path.push_back({ goal_w.x(), goal_w.y() });
+                std::cout << "[A*] append real goal: " << goal_w.transpose() << std::endl;
             }
-            std::reverse(path.begin(), path.end());
             return SearchState::SUCCESS;
         }
 

@@ -143,31 +143,7 @@ inline std::vector<SampleTrajectoryPoint> sampleTrajectoryTrapezoid(
 ) {
     if (path.size() < 2)
         return {};
-
-    // 生成 B 样条平滑点
-    std::vector<Eigen::Vector2d> bspline_pts;
-    if (path.size() >= 4) {
-        for (size_t i = 0; i + 3 < path.size(); i++) {
-            for (int j = 0; j < 10; j++) {
-                double u = j / 10.0;
-                Eigen::Vector4d U(u * u * u, u * u, u, 1.0);
-                Eigen::Matrix4d M;
-                M << -1, 3, -3, 1, 3, -6, 3, 0, -3, 0, 3, 0, 1, 4, 1, 0;
-                for (int k = 0; k < 2; k++) {
-                    Eigen::Vector4d G(path[i][k], path[i + 1][k], path[i + 2][k], path[i + 3][k]);
-                    double val = (U.transpose() * M * G / 6.0).value();
-                    if (k == 0)
-                        bspline_pts.emplace_back(val, 0);
-                    else
-                        bspline_pts.back().y() = val;
-                }
-            }
-        }
-    } else {
-        bspline_pts = path;
-    }
-
-    auto smooth = resamplePath(bspline_pts, 0.05);
+    auto smooth = resamplePath(path, 0.05);
     auto s_map = computeArcLengths(smooth);
     auto k_map = computeOptimizedCurvatures(smooth);
 
