@@ -47,7 +47,8 @@ public:
         ctx_.sample_dt = sample_dt;
         ctx_.init_obs = true;
         Eigen::Matrix<double, 2, 3> headState;
-        init_v = (ctx_.path[1] - ctx_.path[0]).normalized() * init_v.norm();
+        init_v = sampled[1].v.cast<double>();
+        // init_v = init_v.normalized() * std::max(init_v.norm(), 1.0);
         headState << ctx_.head_pos, init_v, Eigen::Vector2d::Zero();
         Eigen::Matrix<double, 2, 3> tailState;
         tailState << ctx_.tail_pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
@@ -224,6 +225,7 @@ public:
             gradByTimes,
             gradByTailStateS
         );
+        gradByTimes += energyT_grad;
         cost_val += energy;
         gradp += energy_grad;
         gradp += gradByPoints;
@@ -280,7 +282,6 @@ public:
             Eigen::Vector2d obs_grad = obstacleTerm(p0, nearest_cost);
             kahanSum(cost_val, c_cost, nearest_cost);
             gradp.col(i).noalias() += obs_grad;
-
         }
 
         return cost_val;
@@ -309,7 +310,7 @@ public:
             return grad;
         }
 
-        double safe_margin = params_.robot_radius *2;
+        double safe_margin = params_.robot_radius * 2;
         double w_safe = 1.0;
         if (d < safe_margin) {
             w_safe += 4.0 * (safe_margin - d) / safe_margin;

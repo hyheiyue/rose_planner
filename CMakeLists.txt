@@ -24,6 +24,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(TBB REQUIRED)
 find_package(rose_map REQUIRED)
@@ -67,6 +68,7 @@ ament_target_dependencies(${PROJECT_NAME}
     nav_msgs
     tf2_ros
     tf2_geometry_msgs
+    visualization_msgs
     rose_map
 )
 rclcpp_components_register_node(${PROJECT_NAME}

@@ -9,6 +9,7 @@ public:
         path_search_params_.load(node);
         opt_params.load(node);
         mpc_params.load(node);
+        resampler_params_.load(node);
         std::vector<double> robot_size_vec =
             node.declare_parameter("robot_size", std::vector<double> { 0.5, 0.5 });
         robot_size = Eigen::Vector2f(robot_size_vec[0], robot_size_vec[1]);
@@ -32,6 +33,7 @@ public:
         }
     } opt_params;
     struct MpcParams {
+        int fps = 100;
         double dt = 0.1;
         int max_iter = 100;
         int predict_steps = 30;
@@ -47,6 +49,7 @@ public:
         // 控制输入正则权重（不能为0，否则QP不稳定）
         std::vector<double> R = { 0.1, 0.1 };
         void load(rclcpp::Node& node) {
+            fps = node.declare_parameter<int>("mpc_control.fps", fps);
             dt = node.declare_parameter<double>("mpc_control.dt", dt);
             max_iter = node.declare_parameter<int>("mpc_control.max_iter", max_iter);
             predict_steps = node.declare_parameter<int>("mpc_control.predict_steps", predict_steps);
@@ -59,6 +62,20 @@ public:
             R = node.declare_parameter<std::vector<double>>("mpc_control.R", R);
         }
     } mpc_params;
+    struct ReSampler {
+        float expected_speed = 3.0;
+        float min_speed = 0.1;
+        float max_acc = 2.0;
+        float dt = 0.1;
+        void load(rclcpp::Node& node) {
+            expected_speed =
+                node.declare_parameter<float>("resampler.expected_speed", expected_speed);
+            min_speed = node.declare_parameter<float>("resampler.min_speed", min_speed);
+            max_acc = node.declare_parameter<float>("resampler.max_acc", max_acc);
+            dt = node.declare_parameter<float>("resampler.dt", dt);
+        }
+    } resampler_params_;
+
     struct PathSearchParams {
         struct AStar {
             float clearance_weight = 5.0f;
@@ -80,19 +97,8 @@ public:
             }
         } a_star;
 
-        struct ReSampler {
-            float max_vel = 3.0;
-            float acc = 2.0;
-            float dt = 0.1;
-            void load(rclcpp::Node& node) {
-                max_vel = node.declare_parameter<float>("path_search.resampler.max_vel", max_vel);
-                acc = node.declare_parameter<float>("path_search.resampler.acc", acc);
-                dt = node.declare_parameter<float>("path_search.resampler.dt", dt);
-            }
-        } resampler;
         void load(rclcpp::Node& node) {
             a_star.load(node);
-            resampler.load(node);
         }
     } path_search_params_;
 };

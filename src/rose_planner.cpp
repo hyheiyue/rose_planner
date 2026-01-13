@@ -14,6 +14,8 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+
 namespace rose_planner {
 struct RosePlanner::Impl {
 public:
@@ -35,8 +37,9 @@ public:
         rose_map_ = std::make_shared<rose_map::RoseMap>(node);
         path_search_ = SearchType::create(rose_map_, parameters_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
+        traj_sampler_ = TrajectorySampler2D::create(parameters_);
         // mpc_ = AcadoMpc::create(parameters_);
-        mpc_ = MpcType::create(parameters_);
+        mpc_ = MpcType::create(rose_map_, parameters_);
         default_wz = node.declare_parameter<double>("default_wz", 0.0);
         target_frame_ = node.declare_parameter<std::string>("target_frame", "");
         std::string odom_topic = node.declare_parameter<std::string>("odom_topic", "");
@@ -63,6 +66,7 @@ public:
         opt_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("opt_path", 10);
         predict_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("predict_path", 10);
         cmd_vel_pub_ = node.create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+        vel_marker_pub_ = node.create_publisher<visualization_msgs::msg::Marker>("/vel_marker", 10);
         timer_thread_ = std::thread([this]() {
             while (running_) {
                 auto start = std::chrono::steady_clock::now();
@@ -70,8 +74,10 @@ public:
                 auto end = std::chrono::steady_clock::now();
                 auto cost =
                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-                if (cost < 100)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100 - cost));
+                if (cost < parameters_.mpc_params.fps)
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(parameters_.mpc_params.fps - cost)
+                    );
             }
         });
 
@@ -241,7 +247,7 @@ public:
                     if (!unsafe_points.empty()) {
                         localReplan(unsafe_points, goal_pos);
                     } else {
-                        unsafe_points = checkSafePath(current_traj_.toPointVector(0.05));
+                        unsafe_points = checkSafePath(current_traj_.toPointVector(0.05), 0.05, 2.0);
                         if (!unsafe_points.empty()
                             && current_raw_path_.size()
                                 > (1 / rose_map_->acc_map_info_.voxel_size_)) {
@@ -314,7 +320,42 @@ public:
         last_yaw_ = yaw;
         return yaw;
     }
+    void publishVelocityArrow(const Eigen::Vector2d& velocity, const rclcpp::Time& stamp) {
+        visualization_msgs::msg::Marker marker;
 
+        marker.header.frame_id = target_frame_;
+        marker.header.stamp = stamp;
+        marker.ns = "mpc_velocity";
+        marker.id = 0;
+
+        marker.type = visualization_msgs::msg::Marker::ARROW;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        geometry_msgs::msg::Point p_start, p_end;
+        p_start.x = current_odom_.pose.pose.position.x;
+        p_start.y = current_odom_.pose.pose.position.y;
+        p_start.z = current_odom_.pose.pose.position.z;
+        double scale = 3.0;
+        auto vel_normalized = velocity.normalized();
+        p_end.x = current_odom_.pose.pose.position.x + scale * vel_normalized.x();
+        p_end.y = current_odom_.pose.pose.position.y + scale * vel_normalized.y();
+        p_end.z = current_odom_.pose.pose.position.z;
+
+        marker.points.push_back(p_start);
+        marker.points.push_back(p_end);
+
+        marker.scale.x = 0.05; // shaft diameter
+        marker.scale.y = 0.1; // head diameter
+        marker.scale.z = 0.15; // head length
+
+        marker.color.r = 0.9f;
+        marker.color.g = 0.1f;
+        marker.color.b = 0.1f;
+        marker.color.a = 1.0f;
+
+        marker.lifetime = rclcpp::Duration::from_seconds(0.1);
+
+        vel_marker_pub_->publish(marker);
+    }
     void mpcCallback() {
         if (replan_fsm_.state_ != ReplanFSM::REPLAN || current_traj_.getPieceNum() < 1
             || !have_traj_) {
@@ -346,6 +387,7 @@ public:
             cmd.linear.y = vy_body;
             cmd.angular.z = default_wz;
             cmd_vel_pub_->publish(cmd);
+            publishVelocityArrow(Eigen::Vector2d(vx_world, vy_world), rclcpp::Clock().now());
         }
 
         nav_msgs::msg::Path predict_path;
@@ -368,7 +410,6 @@ public:
         }
         predict_path_pub_->publish(predict_path);
     }
-
     std::vector<int> checkSafePath(const std::vector<Eigen::Vector2d>& path) {
         std::vector<int> unsafe_points;
         if (path.size() < 2)
@@ -409,11 +450,27 @@ public:
         return unsafe_points;
     }
 
+    std::vector<int>
+    checkSafePath(const std::vector<Eigen::Vector2d>& path, double sample_dt, double horizon) {
+        std::vector<Eigen::Vector2d> path_cut = path;
+
+        int target_size = static_cast<int>(horizon / sample_dt);
+        if (target_size < 0) {
+            target_size = 0;
+        }
+
+        if (static_cast<int>(path_cut.size()) > target_size) {
+            path_cut.resize(target_size);
+        }
+
+        return checkSafePath(path_cut);
+    }
+
     bool checkSafeTraj(const TrajType& traj) {
-        auto sampled = traj.toPointVector(parameters_.path_search_params_.resampler.dt);
+        auto sampled = traj.toPointVector(parameters_.resampler_params_.dt);
         double total_length = 0.0;
         for (int i = 0; i < sampled.size() - 1; ++i) {
-            total_length += segmentLength(sampled[i], sampled[i + 1]);
+            total_length += TrajectorySampler2D::segmentLength(sampled[i], sampled[i + 1]);
         }
         if (total_length > 100) {
             RCLCPP_WARN(node_->get_logger(), "Traj too long, skipping.");
@@ -469,7 +526,8 @@ public:
             return;
         }
 
-        const double stitch_dist = segmentLength(local_path.back(), path_after.front());
+        const double stitch_dist =
+            TrajectorySampler2D::segmentLength(local_path.back(), path_after.front());
         if (stitch_dist > 1.0) { // 若跳变过大，插值一个过渡点
             Eigen::Vector2d mid = 0.5 * (local_path.back() + path_after.front());
             local_path.emplace_back(mid);
@@ -489,7 +547,7 @@ public:
         filtered.push_back(new_raw_path.front());
 
         for (size_t i = 1; i < new_raw_path.size(); i++) {
-            double d = segmentLength(filtered.back(), new_raw_path[i]);
+            double d = TrajectorySampler2D::segmentLength(filtered.back(), new_raw_path[i]);
             if (d > 0.05) {
                 filtered.push_back(new_raw_path[i]);
             }
@@ -635,13 +693,7 @@ public:
         opt_path_msg.header.frame_id = target_frame_;
 
         Eigen::Vector2d start_v = getCurrentVel();
-        auto traj = sampleTrajectoryTrapezoid(
-            path,
-            parameters_.path_search_params_.resampler.acc,
-            parameters_.path_search_params_.resampler.max_vel,
-            parameters_.path_search_params_.resampler.dt,
-            start_v
-        );
+        auto traj = traj_sampler_->sampleTrapezoid(path, start_v);
         // Publish raw path
         if (raw_path_pub_->get_subscription_count() > 0) {
             for (int i = 0; i < (int)traj.size(); i = i + 3) {
@@ -664,11 +716,7 @@ public:
             }
             raw_path_pub_->publish(raw_path_msg);
         }
-        traj_opt_->setSampledPath(
-            traj,
-            parameters_.path_search_params_.resampler.dt,
-            start_v.cast<double>()
-        );
+        traj_opt_->setSampledPath(traj, parameters_.resampler_params_.dt, start_v.cast<double>());
 
         traj_opt_->optimize();
         auto opt_traj = traj_opt_->getTrajectory();
@@ -680,7 +728,7 @@ public:
         // Publish optimized path
         if (opt_path_pub_->get_subscription_count() > 0 && opt_traj.getPieceNum() > 1) {
             double totalDur = opt_traj.getTotalDuration();
-            double dt = parameters_.path_search_params_.resampler.dt;
+            double dt = parameters_.resampler_params_.dt;
             int sampleNum = static_cast<int>(totalDur / dt) + 2;
 
             double t_cur = 0.0;
@@ -877,7 +925,7 @@ public:
     std::thread timer_thread_;
     std::thread control_timer_thread_;
     std::atomic<bool> running_ { true };
-    // AcadoMpc::Ptr mpc_;
+    TrajectorySampler2D::Ptr traj_sampler_;
     MpcType::Ptr mpc_;
     bool have_traj_ = false;
     TrajType current_traj_;
@@ -890,6 +938,7 @@ public:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr opt_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr predict_path_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr vel_marker_pub_;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
 };

@@ -7,6 +7,7 @@
 #include "angles.h"
 #include "common.hpp"
 #include "mpc_common.hpp"
+#include "rose_map/rose_map.hpp"
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <chrono>
@@ -14,14 +15,16 @@
 #include <iostream>
 #include <memory>
 #include <vector>
-
 namespace rose_planner {
 
 class OsqpMpc {
 public:
     using Ptr = std::shared_ptr<OsqpMpc>;
 
-    OsqpMpc(const Parameters& params) {
+    OsqpMpc(rose_map::RoseMap::Ptr rose_map, const Parameters& params) {
+        rose_map_ = rose_map;
+        params_ = params;
+        fps_ = params.mpc_params.fps;
         dt_ = params.mpc_params.dt;
         max_iter_ = params.mpc_params.max_iter;
         T_ = params.mpc_params.predict_steps;
@@ -38,13 +41,15 @@ public:
         dref_ = Eigen::MatrixXd::Zero(2, 500);
         output_ = Eigen::MatrixXd::Zero(2, 500);
         last_output_ = output_;
-
+        last_final_output_ = output_;
+        xbar_.resize(T_ + 1);
+        xopt_.resize(T_ + 1);
         for (int i = 0; i < delay_num_; i++)
             output_buff_.emplace_back(Eigen::Vector2d::Zero());
     }
 
-    static Ptr create(const Parameters& params) {
-        return std::make_shared<OsqpMpc>(params);
+    static Ptr create(rose_map::RoseMap::Ptr rose_map, const Parameters& params) {
+        return std::make_shared<OsqpMpc>(rose_map, params);
     }
 
     void setTrajectory(const TrajType& traj) {
@@ -65,25 +70,24 @@ public:
             std::cerr << "[MPC] Warning: delay_num out of range\n";
             return cmd;
         }
-        
+
         cmd[0] = output_(0, delay_num_);
         cmd[1] = output_(1, delay_num_);
         return cmd;
     }
 
     void solve() {
-
         P_.clear();
         getRefPoints(T_, dt_);
 
         for (int i = 0; i < T_; i++) {
-            xref_(0, i) = P_[i].x;
-            xref_(1, i) = P_[i].y;
-            xref_(2, i) = P_[i].vx;
-            xref_(3, i) = P_[i].vy;
+            xref_(0, i) = P_[i].pos.x();
+            xref_(1, i) = P_[i].pos.y();
+            xref_(2, i) = P_[i].vel.x();
+            xref_(3, i) = P_[i].vel.y();
 
-            dref_(0, i) = P_[i].vx;
-            dref_(1, i) = P_[i].vy;
+            dref_(0, i) = P_[i].vel.x();
+            dref_(1, i) = P_[i].vel.y();
         }
 
         getCmd();
@@ -95,6 +99,15 @@ public:
     }
 
 private:
+    double getEsdf(const Eigen::Vector2d& pos) {
+        double dist = rose_map::ESDF::kInf;
+        rose_map::VoxelKey2D key = rose_map_->worldToKey2D(pos.cast<float>());
+        int idx = rose_map_->key2DToIndex2D(key);
+        if (idx >= 0) {
+            dist = rose_map_->esdf_[idx];
+        }
+        return dist;
+    }
     void getRefPointsInternal(const int T_in, double dt_in) {
         P_.clear();
 
@@ -102,32 +115,117 @@ private:
         if (t_cur < 0)
             t_cur = 0;
 
-        Eigen::Vector2d pos_end;
-        Eigen::Vector2d vel_end;
-        TrajPoint tp;
-        int j = 0;
+        Eigen::Vector2d pos_end = Eigen::Vector2d::Zero();
+        Eigen::Vector2d vel_end = Eigen::Vector2d::Zero();
 
-        for (double t = t_cur + dt_in; j < T_in; j++, t += dt_in) {
+        const double smoothing_tau = 0.20; // 时间常数，越大越平滑（秒）
+        const double min_speed_local = std::max(0.01, min_speed_);
+        std::vector<TrajPoint> raw;
+        std::vector<double> dts;
+        raw.reserve(T_in);
+        dts.reserve(T_in);
+        double t = t_cur;
+        for (int j = 0; j < T_in; ++j) {
+            double dt_eff = dt_in;
+
+            TrajPoint rp;
             if (t <= traj_duration_) {
                 Eigen::Vector2d pos = traj_.getPos(t);
                 Eigen::Vector2d vel = traj_.getVel(t);
-                pos_end = pos;
-                // vel = vel.normalized() * std::max(vel.norm(), min_speed_);
-                vel_end = vel;
                 Eigen::Vector2d acc = traj_.getAcc(t);
-                tp.x = pos.x();
-                tp.y = pos.y();
-                tp.vx = vel.x();
-                tp.vy = vel.y();
-                tp.ax = acc.x();
-                tp.ay = acc.y();
+                Eigen::Vector2d vel_raw = vel;
+                double dist = getEsdf(pos);
+                if (vel.norm() > 1e-8) {
+                    const double R = params_.robot_radius * 2.0;
+                    if (dist < R) {
+                        vel = vel * (dist / R);
+                    }
+                    // 保证最小速度
+                    double vel_norm = vel.norm();
+                    if (vel_norm < min_speed_local && vel_raw.norm() > 1e-8) {
+                        vel = vel.normalized() * min_speed_local;
+                    }
+                    // 防止 vel_raw 为 0 导致除0
+                    double s = (vel_raw.norm() > 1e-8) ? (vel.norm() / vel_raw.norm()) : 1.0;
+                    dt_eff = dt_in * s;
+                    acc *= s;
+                } else {
+                    // vel 近似为0，保持 acc 为 0，dt_eff 不变
+                    acc.setZero();
+                }
+                rp.pos = pos;
+                rp.vel = vel;
+                rp.acc = acc;
+                pos_end = pos;
+                vel_end = vel;
             } else {
-                tp.x = pos_end.x();
-                tp.y = pos_end.y();
-                tp.vx = vel_end.x();
-                tp.vy = vel_end.y();
-                tp.ax = 0;
-                tp.ay = 0;
+                rp.pos = pos_end;
+                double decay = std::max(0.0, 1.0 - (t - traj_duration_));
+                Eigen::Vector2d vel = vel_end * decay;
+                rp.vel = vel;
+                rp.acc = Eigen::Vector2d::Zero();
+            }
+
+            raw.push_back(rp);
+            dts.push_back(dt_eff);
+            t += dt_eff;
+        }
+
+        const int N = (int)raw.size();
+        std::vector<Eigen::Vector2d> v_fwd(N), v_both(N);
+
+        if (N == 0)
+            return;
+
+        // forward pass
+        v_fwd[0] = raw[0].vel;
+        for (int i = 1; i < N; ++i) {
+            double alpha = std::exp(-dts[i - 1] / smoothing_tau);
+            v_fwd[i] = alpha * v_fwd[i - 1] + (1.0 - alpha) * raw[i].vel;
+        }
+
+        // backward pass (reduce相位)
+        v_both[N - 1] = v_fwd[N - 1];
+        for (int i = N - 2; i >= 0; --i) {
+            double alpha = std::exp(-dts[i] / smoothing_tau);
+            v_both[i] = alpha * v_both[i + 1] + (1.0 - alpha) * v_fwd[i];
+        }
+
+        for (int i = 0; i < N - 1; ++i) {
+            Eigen::Vector2d dv = v_both[i + 1] - v_both[i];
+            double max_dv_norm = max_accel_ * dts[i];
+            double dv_norm = dv.norm();
+            if (dv_norm > max_dv_norm && dv_norm > 1e-12) {
+                v_both[i + 1] = v_both[i] + dv * (max_dv_norm / dv_norm);
+            }
+        }
+        for (int i = N - 2; i >= 0; --i) {
+            Eigen::Vector2d dv = v_both[i + 1] - v_both[i];
+            double max_dv_norm = max_accel_ * dts[i];
+            double dv_norm = dv.norm();
+            if (dv_norm > max_dv_norm && dv_norm > 1e-12) {
+                v_both[i] = v_both[i + 1] - dv * (max_dv_norm / dv_norm);
+            }
+        }
+        P_.reserve(N);
+        for (int i = 0; i < N; ++i) {
+            TrajPoint tp;
+            tp.pos = raw[i].pos;
+            tp.vel = v_both[i];
+            tp.acc = raw[i].acc;
+            // compute acceleration: use backward difference if possible, else forward
+            if (i == 0) {
+                // use available raw acc as initial guess, but prefer difference to next if exists
+                if (N > 1 && dts[0] > 1e-12) {
+                    tp.acc.x() = (v_both[1].x() - v_both[0].x()) / dts[0];
+                    tp.acc.y() = (v_both[1].y() - v_both[0].y()) / dts[0];
+                } else {
+                    tp.acc = raw[0].acc;
+                }
+            } else {
+                double dt_here = dts[i - 1] > 1e-12 ? dts[i - 1] : dts.back();
+                tp.acc.x() = (v_both[i].x() - v_both[i - 1].x()) / dt_here;
+                tp.acc.y() = (v_both[i].y() - v_both[i - 1].y()) / dt_here;
             }
 
             P_.push_back(tp);
@@ -167,7 +265,7 @@ private:
         predictMotionInternal();
     }
 
-    void predictMotion(MPCState* b) {
+    void predictMotion(std::vector<MPCState>& b) {
         for (int i = 0; i <= T_; i++)
             b[i] = xbar_[i];
     }
@@ -240,11 +338,16 @@ public:
         qp_upperBound_.setConstant(1e10);
 
         // 初始状态 bound
-        for (int i = 0; i < 4; i++) {
-            double v = (&now_state_.x)[i];
-            qp_lowerBound_[i] = v;
-            qp_upperBound_[i] = v;
-        }
+        Eigen::Vector4d x0;
+        Eigen::Vector2d start_v(now_state_.vx, now_state_.vy);
+        //if (start_v.norm() < min_speed_) {
+        // auto output = getOutput();
+        // start_v = output.normalized() * min_speed_;
+        //}
+        x0 << now_state_.x, now_state_.y, start_v.x(), start_v.y();
+
+        qp_lowerBound_.segment<4>(0) = x0;
+        qp_upperBound_.segment<4>(0) = x0;
 
         // 动力学约束 = 0
         for (int i = 1; i < steps; i++) {
@@ -405,7 +508,6 @@ public:
             std::cerr << "[OSQP] Solution is NaN/Inf!\n";
             return;
         }
-
         for (int i = 0; i < steps; i++) {
             int ui = dimx + 2 * i;
             output_(0, i + delay_num_) = sol[ui];
@@ -414,27 +516,40 @@ public:
     }
 
     void getCmd() {
-        for (int i = 0; i < max_iter_; i++) {
+        const double max_time = 1.0 / static_cast<double>(fps_);
+        const auto t_start = std::chrono::steady_clock::now();
+        for (int iter = 0; iter < max_iter_; ++iter) {
+            const auto t_now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(t_now - t_start).count();
+
+            if (elapsed >= max_time) {
+                break;
+            }
+
             predictMotionInternal();
             last_output_ = output_;
             solveMPCV();
 
-            double du = 0;
-            for (int c = 0; c < output_.cols(); c++) {
+            double du = 0.0;
+            for (int c = 0; c < output_.cols(); ++c) {
                 du += std::fabs(output_(0, c) - last_output_(0, c));
                 du += std::fabs(output_(1, c) - last_output_(1, c));
             }
-            if (du < 1e-4)
+
+            if (du < 1e-4) {
                 break;
+            }
         }
+        last_final_output_ = output_;
         predictMotion(xopt_);
+
         if (delay_num_ > 0) {
             if (!output_buff_.empty())
                 output_buff_.erase(output_buff_.begin());
             output_buff_.push_back({ output_(0, delay_num_), output_(1, delay_num_) });
         }
     }
-
+    int fps_;
     double dt_;
     int T_;
     int max_iter_;
@@ -444,18 +559,19 @@ public:
     double max_cv_;
     double max_accel_;
     double traj_duration_;
-
+    Parameters params_;
     std::vector<double> Q_, R_, Rd_;
     TrajType traj_;
     MPCState now_state_;
-    MPCState xbar_[501];
-    MPCState xopt_[501];
+    std::vector<MPCState> xbar_;
+    std::vector<MPCState> xopt_;
     Eigen::MatrixXd A_, B_;
     Eigen::VectorXd C_;
     Eigen::MatrixXd xref_;
     Eigen::MatrixXd dref_;
     Eigen::MatrixXd output_;
     Eigen::MatrixXd last_output_;
+    Eigen::MatrixXd last_final_output_;
     std::vector<Eigen::Vector2d> output_buff_;
     std::vector<TrajPoint> P_;
     OsqpEigen::Solver solver_;
@@ -469,6 +585,7 @@ public:
     bool solver_initialized_ = false;
     int A_rows_cached_ = 0;
     int A_cols_cached_ = 0;
+    rose_map::RoseMap::Ptr rose_map_;
 };
 
 } // namespace rose_planner

@@ -12,9 +12,10 @@ rose_planner_node:
         clearance_weight: 2.0
         obstacle_penalty_weight: 10.0
         heuristic_weight: 1.0
-      resampler:
-        max_vel: 3.0
-        acc: 3.0
+    resampler:
+        expected_speed: 4.0
+        min_speed: 0.5
+        max_acc: 3.0
         dt: 0.1
     trajectory_opt:
       smooth_weight: 3.0
@@ -27,7 +28,7 @@ rose_planner_node:
       predict_steps: 30
       max_speed: 3.0
       min_speed: 1.0
-      max_accel: 2.0
+      max_accel: 3.0
       delay_num: 0
       Q: [150.0,150.0,0.1,0.1]
       Rd: [1.0,0.1]
@@ -62,7 +63,7 @@ rose_planner_node:
         block_ratio: 0.15
         kernel_size: 3
         dilate_iter: 1
-        use_static_map: true
+        use_static_map: false
         static_map_path: "/home/hy/rose_nav/src/bringup_nav/map/simulation/rmuc_2026.yaml"
       esdf:
         use_diagonals: true
