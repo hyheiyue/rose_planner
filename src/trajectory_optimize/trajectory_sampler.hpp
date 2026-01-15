@@ -31,7 +31,7 @@ public:
         auto smooth = resamplePath(path);
         auto s_map = computeArcLengths(smooth);
 
-        double start_v = std::max(min_speed, init_v.norm());
+        double start_v = init_v.norm();
         double end_v = 0.0;
 
         auto v_profile = computeVelocityProfile(s_map, expected_speed, max_acc, start_v, end_v);

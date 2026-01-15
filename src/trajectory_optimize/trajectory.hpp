@@ -620,7 +620,7 @@ public:
             double d = left + phi * (right - left);
 
             double tau_best = -1.0;
-            double dist_best = 1e9;
+            double dist_best = std::numeric_limits<double>::infinity();
 
             Eigen::Vector2d pc = pieces[i].getPos(c);
             Eigen::Vector2d pd = pieces[i].getPos(d);
@@ -628,6 +628,7 @@ public:
             double fd = (pd - pos).norm();
 
             for (int iter = 0; iter < 30; iter++) {
+                // 记录当前最优
                 if (fc < dist_best) {
                     dist_best = fc;
                     tau_best = c;
@@ -636,35 +637,39 @@ public:
                     dist_best = fd;
                     tau_best = d;
                 }
-                if (fc < eps)
-                    return t_global + c;
-                if (fd < eps)
-                    return t_global + d;
+
+                // 黄金分割更新区间
                 if (fc > fd) {
                     left = c;
                     c = d;
                     fc = fd;
+
                     d = left + phi * (right - left);
-                    pc = pieces[i].getPos(d);
-                    fd = (pc - pos).norm();
+                    pd = pieces[i].getPos(d);
+                    fd = (pd - pos).norm();
                 } else {
                     right = d;
                     d = c;
                     fd = fc;
+
                     c = right - phi * (right - left);
-                    pd = pieces[i].getPos(c);
-                    fc = (pd - pos).norm();
+                    pc = pieces[i].getPos(c);
+                    fc = (pc - pos).norm();
                 }
             }
-            if (dist_best < eps) {
+
+            // 在该 piece 内搜索结束后，统一判断
+            if (dist_best < eps && tau_best >= 0.0) {
                 return t_global + tau_best;
             }
 
             t_global += T;
         }
 
-        return -1.0; // 全轨迹未找到
+        // 整条轨迹都未在 eps 内
+        return -1.0;
     }
+
     inline std::vector<Eigen::Vector2d>
     toPointVectorBySpacing(double ds, double dt_search = 0.01) const {
         std::vector<Eigen::Vector2d> pts;

@@ -4,10 +4,9 @@
 namespace rose_planner {
 class MPCState {
 public:
-    double x = 0;
-    double y = 0;
-    double vx = 0;
-    double vy = 0;
+    Eigen::Vector2d pos;
+    Eigen::Vector2d vel;
+    double yaw;
 };
 
 class TrajPoint {

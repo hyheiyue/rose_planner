@@ -26,8 +26,8 @@ public:
 
     bool checkStartGoalSafe(rose_map::VoxelKey2D& start, rose_map::VoxelKey2D& goal) {
         if (isOccupied(start)) {
-            if (!findNearestSafe(start, start))
-                return false;
+            // if (!findNearestSafe(start, start))
+            return false;
         }
         if (isOccupied(goal)) {
             if (!findNearestSafe(goal, goal))

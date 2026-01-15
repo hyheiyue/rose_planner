@@ -47,7 +47,8 @@ public:
         ctx_.sample_dt = sample_dt;
         ctx_.init_obs = true;
         Eigen::Matrix<double, 2, 3> headState;
-        init_v = sampled[1].v.cast<double>();
+        init_v = Eigen::Vector2d::Zero();
+        // init_v = sampled[1].v.cast<double>();
         // init_v = init_v.normalized() * std::max(init_v.norm(), 1.0);
         headState << ctx_.head_pos, init_v, Eigen::Vector2d::Zero();
         Eigen::Matrix<double, 2, 3> tailState;
@@ -156,7 +157,7 @@ public:
 
             virtualT = x.segment(timeOffset, pieceNum);
 
-            VirtualT2RealT(virtualT, ctx_.inTimes);
+            // VirtualT2RealT(virtualT, ctx_.inTimes);
 
             minco_.setParameters(inPs, ctx_.inTimes);
             minco_.getTrajectory(finalTraj_);
@@ -189,13 +190,13 @@ public:
         idx += points_num;
         inPs.row(1) = x.segment(idx, points_num).transpose();
         idx += points_num;
-        Eigen::VectorXd t = x.segment(idx, pieceNum);
+        // Eigen::VectorXd t = x.segment(idx, pieceNum);
         idx += pieceNum;
 
         Eigen::Matrix2Xd gradp = Eigen::Matrix2Xd::Zero(2, points_num);
         Eigen::VectorXd gradt = Eigen::VectorXd::Zero(pieceNum);
 
-        instance->VirtualT2RealT(t, instance->ctx_.inTimes);
+        // instance->VirtualT2RealT(t, instance->ctx_.inTimes);
 
         instance->minco_.setParameters(inPs, instance->ctx_.inTimes);
 
@@ -234,36 +235,13 @@ public:
         Eigen::VectorXd rhotimes;
         rhotimes.resize(gradByTimes.size());
         gradByTimes += instance->w_time * rhotimes.setOnes();
-        instance->backwardGradT(t, gradByTimes, gradt);
+        // instance->backwardGradT(t, gradByTimes, gradt);
         g.setZero();
         g.segment(0, points_num) = gradp.row(0).transpose();
         g.segment(points_num, points_num) = gradp.row(1).transpose();
-        g.segment(2 * points_num, pieceNum) = gradt;
+        // g.segment(2 * points_num, pieceNum) = gradt;
 
         return cost_val;
-    }
-    static inline bool smoothedL1(const double& x, const double& mu, double& f, double& df) {
-        if (x < 0.0) {
-            return false;
-        } else if (x > mu) {
-            f = x - 0.5 * mu;
-            df = 1.0;
-            return true;
-        } else {
-            const double xdmu = x / mu;
-            const double sqrxdmu = xdmu * xdmu;
-            const double mumxd2 = mu - 0.5 * x;
-            f = mumxd2 * sqrxdmu * xdmu;
-            df = sqrxdmu * ((-0.5) * xdmu + 3.0 * mumxd2 / mu);
-            return true;
-        }
-    }
-    static inline double kahanSum(double& sum, double& c, const double& val) {
-        double y = val - c;
-        double t = sum + y;
-        c = (t - sum) - y;
-        sum = t;
-        return sum;
     }
     double attachPenaltyFunctional(const Eigen::Matrix2Xd& inPs, Eigen::Matrix2Xd& gradp) {
         const int N = inPs.cols();
@@ -331,56 +309,96 @@ public:
         const {
         if (!rose_map_)
             return false;
+
         const double vs = rose_map_->acc_map_info_.voxel_size_;
         if (vs <= 0.0)
             return false;
+
         const double R = 1.0;
+
         Eigen::Vector2f pos2f(pos.x(), pos.y());
         auto key = rose_map_->worldToKey2D(pos2f);
         if (rose_map_->key2DToIndex2D(key) < 0)
             return false;
-
-        // 采样时截断距离避免突变
         auto read = [&](int dx, int dy) {
             rose_map::VoxelKey2D k { key.x + dx, key.y + dy };
             int idx = rose_map_->key2DToIndex2D(k);
             if (idx < 0)
                 return R + 1.0;
+
             double d = rose_map_->esdf_[idx];
-            return std::min(std::isfinite(d) ? d : R + 1.0, R + 1.0);
+            if (!std::isfinite(d))
+                return R + 1.0;
+
+            return std::min(d, R + 1.0);
         };
 
-        double x0 = read(-1, 0), x1 = read(0, 0), x2 = read(1, 0);
-        double x3 = read(-1, 1), x4 = read(0, 1), x5 = read(1, 1);
-        double y0 = read(0, -1), y1 = read(0, 0), y2 = read(0, 1);
-        double y3 = read(1, -1), y4 = read(1, 0), y5 = read(1, 1);
+        double d[4][4];
+        for (int iy = 0; iy < 4; ++iy) {
+            for (int ix = 0; ix < 4; ++ix) {
+                d[iy][ix] = read(ix - 1, iy - 1);
+            }
+        }
 
-        auto fitQuad = [&](double p0, double p1, double p2, double f) {
-            double a = 0.5 * (p2 + p0 - 2 * p1);
-            double b = 0.5 * (p2 - p0);
-            double c = p1;
-            double v = a * f * f + b * f + c;
-            double gq = 2 * a * f + b;
-            return std::pair<double, double> { v, gq };
+        double fx = (pos2f.x() - (key.x + 0.5) * vs) / vs + 0.5;
+        double fy = (pos2f.y() - (key.y + 0.5) * vs) / vs + 0.5;
+
+        fx = std::clamp(fx, 0.0, 1.0);
+        fy = std::clamp(fy, 0.0, 1.0);
+
+        auto w = [](double t, int i) {
+            // i = 0,1,2,3  →  p_{-1}, p_0, p_1, p_2
+            double x = std::abs(t - (i - 1));
+            if (x < 1.0)
+                return 1.5 * x * x * x - 2.5 * x * x + 1.0;
+            else if (x < 2.0)
+                return -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0;
+            else
+                return 0.0;
         };
 
-        double fx = (pos2f.x() - (key.x + 0.5) * vs) / vs;
-        double fy = (pos2f.y() - (key.y + 0.5) * vs) / vs;
-        fx = std::clamp(fx, -0.5, 0.5);
-        fy = std::clamp(fy, -0.5, 0.5);
+        auto dw = [](double t, int i) {
+            double s = t - (i - 1);
+            double x = std::abs(s);
+            double sign = (s >= 0.0) ? 1.0 : -1.0;
 
-        auto r0 = fitQuad(x0, x1, x2, fx);
-        auto r1 = fitQuad(x3, x4, x5, fx);
-        double valx = r0.first * (1.0 - (fy + 0.5)) + r1.first * (fy + 0.5);
-        double gradx = r0.second * (1.0 - (fy + 0.5)) + r1.second * (fy + 0.5);
+            if (x < 1.0)
+                return sign * (4.5 * x * x - 5.0 * x);
+            else if (x < 2.0)
+                return sign * (-1.5 * x * x + 5.0 * x - 4.0);
+            else
+                return 0.0;
+        };
 
-        auto s0 = fitQuad(y0, y1, y2, fy);
-        auto s1 = fitQuad(y3, y4, y5, fy);
-        double valy = s0.first * (1.0 - (fx + 0.5)) + s1.first * (fx + 0.5);
-        double grady = s0.second * (1.0 - (fx + 0.5)) + s1.second * (fx + 0.5);
+        double val = 0.0;
+        double gx = 0.0;
+        double gy = 0.0;
 
-        out_dist = 0.5 * (valx + valy);
-        out_grad = Eigen::Vector2d(gradx, grady);
+        for (int iy = 0; iy < 4; ++iy) {
+            double wy = w(fy, iy);
+            double dwy = dw(fy, iy);
+
+            for (int ix = 0; ix < 4; ++ix) {
+                double wx = w(fx, ix);
+                double dwx = dw(fx, ix);
+
+                double v = d[iy][ix];
+                val += v * wx * wy;
+                gx += v * dwx * wy;
+                gy += v * wx * dwy;
+            }
+        }
+
+        out_dist = val;
+        out_grad = Eigen::Vector2d(gx / vs, gy / vs);
+
+        double gnorm = out_grad.norm();
+        if (gnorm > 1e-6) {
+            out_grad *= std::min(1.0, 1.0 / gnorm);
+        }
+        if (out_dist > R) {
+            out_grad.setZero();
+        }
 
         return out_dist < R;
     }

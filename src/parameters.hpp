@@ -40,7 +40,7 @@ public:
         double max_speed = 2.0;
         double min_speed = 0.5;
         double max_accel = 1.0;
-        int delay_num = 1;
+        double delay_time = 0.0;
         std::vector<double> Q = { 15.0, 15.0, 0.5, 0.5 };
 
         // 控制变化正则/参考权重 [vx_cmd, vy_cmd]
@@ -56,7 +56,7 @@ public:
             max_speed = node.declare_parameter<double>("mpc_control.max_speed", max_speed);
             min_speed = node.declare_parameter<double>("mpc_control.min_speed", min_speed);
             max_accel = node.declare_parameter<double>("mpc_control.max_accel", max_accel);
-            delay_num = node.declare_parameter<int>("mpc_control.delay_num", delay_num);
+            delay_time = node.declare_parameter<double>("mpc_control.delay_time", delay_time);
             Q = node.declare_parameter<std::vector<double>>("mpc_control.Q", Q);
             Rd = node.declare_parameter<std::vector<double>>("mpc_control.Rd", Rd);
             R = node.declare_parameter<std::vector<double>>("mpc_control.R", R);

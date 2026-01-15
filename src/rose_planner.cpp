@@ -13,9 +13,9 @@
 #include "mpc_control/qpoases_mpc.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker.hpp>
-
 namespace rose_planner {
 struct RosePlanner::Impl {
 public:
@@ -66,7 +66,10 @@ public:
         opt_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("opt_path", 10);
         predict_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("predict_path", 10);
         cmd_vel_pub_ = node.create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+        cmd_vel_norm_pub_ = node.create_publisher<std_msgs::msg::Float64>("/cmd_vel_norm", 10);
         vel_marker_pub_ = node.create_publisher<visualization_msgs::msg::Marker>("/vel_marker", 10);
+        opt_marker_pub_ =
+            node.create_publisher<visualization_msgs::msg::Marker>("/opt_traj_marker", 10);
         timer_thread_ = std::thread([this]() {
             while (running_) {
                 auto start = std::chrono::steady_clock::now();
@@ -74,10 +77,8 @@ public:
                 auto end = std::chrono::steady_clock::now();
                 auto cost =
                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-                if (cost < parameters_.mpc_params.fps)
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(parameters_.mpc_params.fps - cost)
-                    );
+                if (cost < 100)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100 - cost));
             }
         });
 
@@ -88,8 +89,10 @@ public:
                 auto end = std::chrono::steady_clock::now();
                 auto cost =
                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-                if (cost < 10)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10 - cost));
+                if (cost < 1000 / parameters_.mpc_params.fps)
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(1000 / parameters_.mpc_params.fps - cost)
+                    );
             }
         });
         use_control_output_ = node.declare_parameter<bool>("use_control_output", false);
@@ -247,7 +250,7 @@ public:
                     if (!unsafe_points.empty()) {
                         localReplan(unsafe_points, goal_pos);
                     } else {
-                        unsafe_points = checkSafePath(current_traj_.toPointVector(0.05), 0.05, 2.0);
+                        unsafe_points = checkSafePath(current_traj_.toPointVector(0.05), 0.05, 3.0);
                         if (!unsafe_points.empty()
                             && current_raw_path_.size()
                                 > (1 / rose_map_->acc_map_info_.voxel_size_)) {
@@ -343,9 +346,9 @@ public:
         marker.points.push_back(p_start);
         marker.points.push_back(p_end);
 
-        marker.scale.x = 0.05; // shaft diameter
-        marker.scale.y = 0.1; // head diameter
-        marker.scale.z = 0.15; // head length
+        marker.scale.x = 0.1; // shaft diameter
+        marker.scale.y = 0.2; // head diameter
+        marker.scale.z = 0.3; // head length
 
         marker.color.r = 0.9f;
         marker.color.g = 0.1f;
@@ -365,10 +368,11 @@ public:
         Eigen::Vector2d start_v = getCurrentVel();
         MPCState now_state;
         auto current = getCurrentPose();
-        now_state.x = current.pose.position.x;
-        now_state.y = current.pose.position.y;
-        now_state.vx = start_v.x();
-        now_state.vy = start_v.y();
+        now_state.pos.x() = current.pose.position.x;
+        now_state.pos.y() = current.pose.position.y;
+        now_state.vel.x() = start_v.x();
+        now_state.vel.y() = start_v.y();
+        now_state.yaw = orientationToYaw(current.pose.orientation);
         mpc_->setCurrent(now_state);
         mpc_->solve();
         if (use_control_output_) {
@@ -387,6 +391,9 @@ public:
             cmd.linear.y = vy_body;
             cmd.angular.z = default_wz;
             cmd_vel_pub_->publish(cmd);
+            std_msgs::msg::Float64 cmd_norm;
+            cmd_norm.data = std::hypot(vx_world, vy_world);
+            cmd_vel_norm_pub_->publish(cmd_norm);
             publishVelocityArrow(Eigen::Vector2d(vx_world, vy_world), rclcpp::Clock().now());
         }
 
@@ -396,11 +403,11 @@ public:
         geometry_msgs::msg::PoseStamped pose_msg;
         for (int i = 0; i < mpc_->T_; ++i) {
             pose_msg.header = predict_path.header;
-            pose_msg.pose.position.x = mpc_->xopt_[i].x;
-            pose_msg.pose.position.y = mpc_->xopt_[i].y;
+            pose_msg.pose.position.x = mpc_->xopt_[i].pos.x();
+            pose_msg.pose.position.y = mpc_->xopt_[i].pos.y();
             pose_msg.pose.position.z = current.pose.position.z;
-            double yaw = std::hypot(mpc_->xopt_[i].vx, mpc_->xopt_[i].vy) > 1e-3
-                ? std::atan2(mpc_->xopt_[i].vy, mpc_->xopt_[i].vx)
+            double yaw = std::hypot(mpc_->xopt_[i].vel.x(), mpc_->xopt_[i].vel.y()) > 1e-3
+                ? std::atan2(mpc_->xopt_[i].vel.y(), mpc_->xopt_[i].vel.x())
                 : 0.0;
             tf2::Quaternion q;
             q.setRPY(0, 0, yaw);
@@ -725,7 +732,7 @@ public:
             have_traj_ = true;
         }
 
-        // Publish optimized path
+        // Publish optimized path + marker spheres
         if (opt_path_pub_->get_subscription_count() > 0 && opt_traj.getPieceNum() > 1) {
             double totalDur = opt_traj.getTotalDuration();
             double dt = parameters_.resampler_params_.dt;
@@ -734,15 +741,32 @@ public:
             double t_cur = 0.0;
             opt_path_msg.poses.clear();
 
+            visualization_msgs::msg::Marker marker;
+            marker.header = opt_path_msg.header;
+            marker.ns = "opt_traj";
+            marker.id = 0;
+            marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+            marker.action = visualization_msgs::msg::Marker::ADD;
+
+            marker.scale.x = 0.2; // 球半径（直径）
+            marker.scale.y = 0.2;
+            marker.scale.z = 0.2;
+
+            marker.color.r = 0.1f;
+            marker.color.g = 0.1f;
+            marker.color.b = 0.9f;
+            marker.color.a = 1.0f;
+
+            marker.points.clear();
+
             for (int i = 0; i < sampleNum; ++i) {
                 Eigen::VectorXd pos = opt_traj.getPos(t_cur);
                 Eigen::VectorXd vel = opt_traj.getVel(t_cur);
                 if (pos.size() < 2 || vel.size() < 2)
-                    break; // 保护
+                    break;
 
                 double yaw =
                     std::hypot(vel.x(), vel.y()) > 1e-3 ? std::atan2(vel.y(), vel.x()) : 0.0;
-
                 geometry_msgs::msg::PoseStamped p;
                 p.header = opt_path_msg.header;
                 p.pose.position.x = pos.x();
@@ -755,10 +779,18 @@ public:
                 p.pose.orientation = tf2::toMsg(q);
 
                 opt_path_msg.poses.push_back(p);
+                geometry_msgs::msg::Point mp;
+                mp.x = pos.x();
+                mp.y = pos.y();
+                mp.z = p.pose.position.z;
+                marker.points.push_back(mp);
+
                 t_cur = std::min(t_cur + dt, totalDur);
             }
 
+            // 发布
             opt_path_pub_->publish(opt_path_msg);
+            opt_marker_pub_->publish(marker);
         }
     }
 
@@ -938,7 +970,9 @@ public:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr opt_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr predict_path_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr cmd_vel_norm_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr vel_marker_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr opt_marker_pub_;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
 };
