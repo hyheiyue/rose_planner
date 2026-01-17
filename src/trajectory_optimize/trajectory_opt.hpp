@@ -310,7 +310,7 @@ public:
         if (!rose_map_)
             return false;
 
-        const double vs = rose_map_->acc_map_info_.voxel_size_;
+        const double vs = rose_map_->acc_map_info_.voxel_size;
         if (vs <= 0.0)
             return false;
 

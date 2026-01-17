@@ -89,7 +89,7 @@ private:
         dir /= len;
 
         // 步长：1/2 个 voxel
-        float step = 0.5f * rose_map_->acc_map_info_.voxel_size_;
+        float step = 0.5f * rose_map_->acc_map_info_.voxel_size;
         float t = 0.0f;
 
         Eigen::Vector2f last_inside = start_w;

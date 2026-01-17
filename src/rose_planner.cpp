@@ -253,7 +253,7 @@ public:
                         unsafe_points = checkSafePath(current_traj_.toPointVector(0.05), 0.05, 3.0);
                         if (!unsafe_points.empty()
                             && current_raw_path_.size()
-                                > (1 / rose_map_->acc_map_info_.voxel_size_)) {
+                                > (1 / rose_map_->acc_map_info_.voxel_size)) {
                             resampleAndOpt(current_raw_path_);
                         }
                     }
@@ -423,7 +423,7 @@ public:
             return unsafe_points;
 
         const double step =
-            std::min(rose_map_->acc_map_info_.voxel_size_ * 0.5, parameters_.robot_radius * 0.5);
+            std::min(rose_map_->acc_map_info_.voxel_size * 0.5, parameters_.robot_radius * 0.5);
 
         for (int i = 0; i + 1 < path.size(); ++i) {
             const Eigen::Vector2d& p0 = path[i];
@@ -497,7 +497,7 @@ public:
 
         int local_end_idx = unsafe_points.empty()
             ? findHeadPointIndex(start_w, current_raw_path_)
-            : unsafe_points.back() + (1 / rose_map_->acc_map_info_.voxel_size_);
+            : unsafe_points.back() + (1 / rose_map_->acc_map_info_.voxel_size);
 
         local_end_idx = std::clamp(local_end_idx, 0, Num - 1);
 

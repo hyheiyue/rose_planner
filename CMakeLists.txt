@@ -32,11 +32,11 @@ find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(OsqpEigen REQUIRED)
 find_package(osqp REQUIRED)
-find_package(qpOASES REQUIRED)
+# find_package(qpOASES REQUIRED)
 set(OSQP_LIB_PATH /usr/local/lib/libosqp.so)  
 include_directories(/usr/local/include/osqp)  
 message(STATUS "Using manually specified OSQP C library: ${OSQP_LIB_PATH}")
-include_directories(/usr/local/include/qpOASES)
+# include_directories(/usr/local/include/qpOASES)
 
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
@@ -57,7 +57,7 @@ target_link_libraries(${PROJECT_NAME}
     ${CERES_LIBRARIES}
     ${OSQP_LIB_PATH}
     OsqpEigen::OsqpEigen
-    qpOASES
+    # qpOASES
     
 )
 ament_target_dependencies(${PROJECT_NAME}
