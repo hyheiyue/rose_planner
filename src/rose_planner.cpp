@@ -239,21 +239,26 @@ public:
                 }
                 removeOldTraj();
                 removeOldPath();
+                
                 if (!checkSafeTraj(current_traj_)) {
+                    have_traj_ = false;
                     searchOnce(goal_pos);
                     break;
                 }
                 auto unsafe_points = checkSafePath(current_raw_path_);
                 if (dynamic_replan_) {
+                    have_traj_ = false;
                     searchOnce(goal_pos);
                 } else {
                     if (!unsafe_points.empty()) {
+                        have_traj_ = false;
                         localReplan(unsafe_points, goal_pos);
                     } else {
                         unsafe_points = checkSafePath(current_traj_.toPointVector(0.05), 0.05, 3.0);
                         if (!unsafe_points.empty()
-                            && current_raw_path_.size()
-                                > (1 / rose_map_->acc_map_info_.voxel_size)) {
+                            && current_raw_path_.size() > (1 / rose_map_->acc_map_info_.voxel_size))
+                        {
+                            have_traj_ = false;
                             resampleAndOpt(current_raw_path_);
                         }
                     }
@@ -269,6 +274,7 @@ public:
                 );
                 RCLCPP_INFO(node_->get_logger(), "New goal received, starting global search");
                 replan_fsm_.state_ = ReplanFSM::REPLAN;
+                have_traj_ = false;
                 searchOnce(goal_w);
 
                 break;
@@ -361,7 +367,16 @@ public:
     }
     void mpcCallback() {
         if (replan_fsm_.state_ != ReplanFSM::REPLAN || current_traj_.getPieceNum() < 1
-            || !have_traj_) {
+            ) {
+            return;
+        }
+        if(!have_traj_&&use_control_output_)
+        {
+            geometry_msgs::msg::Twist cmd;
+            cmd.linear.x = 0.0;
+            cmd.linear.y = 0.0;
+            cmd.angular.z = default_wz;
+            cmd_vel_pub_->publish(cmd);
             return;
         }
         mpc_->setTrajectory(current_traj_);
@@ -415,6 +430,20 @@ public:
             pose_msg.pose.orientation = tf2::toMsg(q);
             predict_path.poses.push_back(pose_msg);
         }
+        // for (int i = 0; i < mpc_->T_; ++i) {
+        //     pose_msg.header = predict_path.header;
+        //     pose_msg.pose.position.x = mpc_->P_[i].pos.x();
+        //     pose_msg.pose.position.y = mpc_->P_[i].pos.y();
+        //     pose_msg.pose.position.z = current.pose.position.z;
+        //     double yaw = std::hypot(mpc_->P_[i].vel.x(), mpc_->P_[i].vel.y()) > 1e-3
+        //         ? std::atan2(mpc_->P_[i].vel.y(), mpc_->P_[i].vel.x())
+        //         : 0.0;
+        //     tf2::Quaternion q;
+        //     q.setRPY(0, 0, yaw);
+        //     q.normalize();
+        //     pose_msg.pose.orientation = tf2::toMsg(q);
+        //     predict_path.poses.push_back(pose_msg);
+        // }
         predict_path_pub_->publish(predict_path);
     }
     std::vector<int> checkSafePath(const std::vector<Eigen::Vector2d>& path) {
@@ -733,7 +762,10 @@ public:
         }
 
         // Publish optimized path + marker spheres
-        if (opt_path_pub_->get_subscription_count() > 0 && opt_traj.getPieceNum() > 1) {
+        if ((opt_path_pub_->get_subscription_count() > 0
+             || opt_marker_pub_->get_subscription_count() > 0)
+            && opt_traj.getPieceNum() > 1)
+        {
             double totalDur = opt_traj.getTotalDuration();
             double dt = parameters_.resampler_params_.dt;
             int sampleNum = static_cast<int>(totalDur / dt) + 2;

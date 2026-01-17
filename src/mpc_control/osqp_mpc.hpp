@@ -115,6 +115,7 @@ private:
         raw.reserve(T_in);
         dts.reserve(T_in);
         double t = t_cur + dt_in + delay_time_;
+
         for (int j = 0; j < T_in; ++j) {
             double dt_eff = dt_in;
 
@@ -140,7 +141,6 @@ private:
                     dt_eff = dt_in * s;
                     acc *= s;
                 } else {
-                    // vel 近似为0，保持 acc 为 0，dt_eff 不变
                     acc.setZero();
                 }
                 rp.pos = pos;
@@ -181,22 +181,6 @@ private:
             v_both[i] = alpha * v_both[i + 1] + (1.0 - alpha) * v_fwd[i];
         }
 
-        for (int i = 0; i < N - 1; ++i) {
-            Eigen::Vector2d dv = v_both[i + 1] - v_both[i];
-            double max_dv_norm = max_accel_ * dts[i];
-            double dv_norm = dv.norm();
-            if (dv_norm > max_dv_norm && dv_norm > 1e-12) {
-                v_both[i + 1] = v_both[i] + dv * (max_dv_norm / dv_norm);
-            }
-        }
-        for (int i = N - 2; i >= 0; --i) {
-            Eigen::Vector2d dv = v_both[i + 1] - v_both[i];
-            double max_dv_norm = max_accel_ * dts[i];
-            double dv_norm = dv.norm();
-            if (dv_norm > max_dv_norm && dv_norm > 1e-12) {
-                v_both[i] = v_both[i + 1] - dv * (max_dv_norm / dv_norm);
-            }
-        }
         P_.reserve(N);
         for (int i = 0; i < N; ++i) {
             TrajPoint tp;
@@ -331,11 +315,15 @@ public:
         qp_upperBound_.setConstant(nc, 1e10);
 
         Eigen::Vector4d x0;
-        // x0 << now_state_.pos.x(), now_state_.pos.y(), xref_(2, 0), xref_(3, 0);
         x0 << now_state_.pos.x(), now_state_.pos.y(), now_state_.vel.x(), now_state_.vel.y();
-
-        qp_lowerBound_.segment<4>(0) = x0;
-        qp_upperBound_.segment<4>(0) = x0;
+        double enable_err = 0.1;
+        enable_err = enable_err * 0.5 / now_state_.vel.norm();
+        Eigen::Vector4d x0l;
+        x0l << x0[0] - enable_err, x0[1] - enable_err, x0[2], x0[3];
+        Eigen::Vector4d x0u;
+        x0u << x0[0] + enable_err, x0[1] + enable_err, x0[2], x0[3];
+        qp_lowerBound_.segment<4>(0) = x0l;
+        qp_upperBound_.segment<4>(0) = x0u;
 
         for (int i = 1; i < steps; i++) {
             int r = 4 * i;

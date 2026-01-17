@@ -157,7 +157,7 @@ public:
 
             virtualT = x.segment(timeOffset, pieceNum);
 
-            // VirtualT2RealT(virtualT, ctx_.inTimes);
+            VirtualT2RealT(virtualT, ctx_.inTimes);
 
             minco_.setParameters(inPs, ctx_.inTimes);
             minco_.getTrajectory(finalTraj_);
@@ -190,13 +190,13 @@ public:
         idx += points_num;
         inPs.row(1) = x.segment(idx, points_num).transpose();
         idx += points_num;
-        // Eigen::VectorXd t = x.segment(idx, pieceNum);
+        Eigen::VectorXd t = x.segment(idx, pieceNum);
         idx += pieceNum;
 
         Eigen::Matrix2Xd gradp = Eigen::Matrix2Xd::Zero(2, points_num);
         Eigen::VectorXd gradt = Eigen::VectorXd::Zero(pieceNum);
 
-        // instance->VirtualT2RealT(t, instance->ctx_.inTimes);
+        instance->VirtualT2RealT(t, instance->ctx_.inTimes);
 
         instance->minco_.setParameters(inPs, instance->ctx_.inTimes);
 
@@ -235,11 +235,11 @@ public:
         Eigen::VectorXd rhotimes;
         rhotimes.resize(gradByTimes.size());
         gradByTimes += instance->w_time * rhotimes.setOnes();
-        // instance->backwardGradT(t, gradByTimes, gradt);
+        instance->backwardGradT(t, gradByTimes, gradt);
         g.setZero();
         g.segment(0, points_num) = gradp.row(0).transpose();
         g.segment(points_num, points_num) = gradp.row(1).transpose();
-        // g.segment(2 * points_num, pieceNum) = gradt;
+        g.segment(2 * points_num, pieceNum) = gradt;
 
         return cost_val;
     }
