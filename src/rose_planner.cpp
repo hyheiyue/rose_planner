@@ -1,4 +1,5 @@
 #include "rose_planner.hpp"
+#include "control/osqp_mpc.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "parameters.hpp"
@@ -8,19 +9,19 @@
 #include "trajectory_optimize/trajectory_opt.hpp"
 #include "trajectory_optimize/trajectory_sampler.hpp"
 #include <angles.h>
-// #include <mpc_control/acado_mpc.hpp>
-#include "mpc_control/osqp_mpc.hpp"
-#include "mpc_control/qpoases_mpc.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+//clang-format off
+#include "control/acado_mpc.hpp"
+//clang-format on
 namespace rose_planner {
 struct RosePlanner::Impl {
 public:
     using SearchType = AStar;
-    using MpcType = OsqpMpc;
+    using MpcType = control::OsqpMpc;
     double default_wz = 0.0;
     ~Impl() {
         running_ = false;
@@ -30,15 +31,15 @@ public:
             control_timer_thread_.join();
     }
 
-    Impl(rclcpp::Node& node): tf_buffer_(node.get_clock()) {
+    Impl(rclcpp::Node& node) {
         node_ = &node;
+        tf_ = TF::create(node);
         parameters_.load(node);
 
         rose_map_ = std::make_shared<rose_map::RoseMap>(node);
         path_search_ = SearchType::create(rose_map_, parameters_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, parameters_);
         traj_sampler_ = TrajectorySampler2D::create(parameters_);
-        // mpc_ = AcadoMpc::create(parameters_);
         mpc_ = MpcType::create(rose_map_, parameters_);
         default_wz = node.declare_parameter<double>("default_wz", 0.0);
         target_frame_ = node.declare_parameter<std::string>("target_frame", "");
@@ -144,8 +145,6 @@ public:
         q_pred.normalize();
         Eigen::Vector3d p_pred(px, py, pz);
         p_pred += v * dt;
-
-        // 赋值回 ROS2
         predicted_pose.pose.position.x = p_pred.x();
         predicted_pose.pose.position.y = p_pred.y();
         predicted_pose.pose.position.z = p_pred.z();
@@ -239,7 +238,6 @@ public:
                 }
                 removeOldTraj();
                 removeOldPath();
-                
                 if (!checkSafeTraj(current_traj_)) {
                     have_traj_ = false;
                     searchOnce(goal_pos);
@@ -256,7 +254,7 @@ public:
                     } else {
                         unsafe_points = checkSafePath(current_traj_.toPointVector(0.05), 0.05, 3.0);
                         if (!unsafe_points.empty()
-                            && current_raw_path_.size() > (1 / rose_map_->acc_map_info_.voxel_size))
+                            && current_raw_path_.size() > (1 / rose_map_->esdf_->esdf_->voxel_size))
                         {
                             have_traj_ = false;
                             resampleAndOpt(current_raw_path_);
@@ -289,6 +287,9 @@ public:
             replan_fsm_.state_ = ReplanFSM::SEARCH_PATH;
             return;
         }
+        t_cur -= 0.0;
+        if (t_cur < 0)
+            t_cur = 0;
         current_traj_.truncateBeforeTime(t_cur);
     }
     void removeOldPath() {
@@ -329,49 +330,23 @@ public:
         last_yaw_ = yaw;
         return yaw;
     }
-    void publishVelocityArrow(const Eigen::Vector2d& velocity, const rclcpp::Time& stamp) {
-        visualization_msgs::msg::Marker marker;
-
-        marker.header.frame_id = target_frame_;
-        marker.header.stamp = stamp;
-        marker.ns = "mpc_velocity";
-        marker.id = 0;
-
-        marker.type = visualization_msgs::msg::Marker::ARROW;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        geometry_msgs::msg::Point p_start, p_end;
-        p_start.x = current_odom_.pose.pose.position.x;
-        p_start.y = current_odom_.pose.pose.position.y;
-        p_start.z = current_odom_.pose.pose.position.z;
-        double scale = 3.0;
-        auto vel_normalized = velocity.normalized();
-        p_end.x = current_odom_.pose.pose.position.x + scale * vel_normalized.x();
-        p_end.y = current_odom_.pose.pose.position.y + scale * vel_normalized.y();
-        p_end.z = current_odom_.pose.pose.position.z;
-
-        marker.points.push_back(p_start);
-        marker.points.push_back(p_end);
-
-        marker.scale.x = 0.1; // shaft diameter
-        marker.scale.y = 0.2; // head diameter
-        marker.scale.z = 0.3; // head length
-
-        marker.color.r = 0.9f;
-        marker.color.g = 0.1f;
-        marker.color.b = 0.1f;
-        marker.color.a = 1.0f;
-
-        marker.lifetime = rclcpp::Duration::from_seconds(0.1);
-
-        vel_marker_pub_->publish(marker);
+    control::State getNowState() {
+        control::State now_state;
+        auto current = getCurrentPose();
+        now_state.pos.x() = current.pose.position.x;
+        now_state.pos.y() = current.pose.position.y;
+        Eigen::Vector2d start_v = getCurrentVel();
+        now_state.vel.x() = start_v.x();
+        now_state.vel.y() = start_v.y();
+        double now_yaw = orientationToYaw(current.pose.orientation);
+        now_state.yaw = now_yaw;
+        return now_state;
     }
     void mpcCallback() {
-        if (replan_fsm_.state_ != ReplanFSM::REPLAN || current_traj_.getPieceNum() < 1
-            ) {
+        if (replan_fsm_.state_ != ReplanFSM::REPLAN || current_traj_.getPieceNum() < 1) {
             return;
         }
-        if(!have_traj_&&use_control_output_)
-        {
+        if (!have_traj_ && use_control_output_) {
             geometry_msgs::msg::Twist cmd;
             cmd.linear.x = 0.0;
             cmd.linear.y = 0.0;
@@ -380,107 +355,84 @@ public:
             return;
         }
         mpc_->setTrajectory(current_traj_);
-        Eigen::Vector2d start_v = getCurrentVel();
-        MPCState now_state;
-        auto current = getCurrentPose();
-        now_state.pos.x() = current.pose.position.x;
-        now_state.pos.y() = current.pose.position.y;
-        now_state.vel.x() = start_v.x();
-        now_state.vel.y() = start_v.y();
-        now_state.yaw = orientationToYaw(current.pose.orientation);
+
+        auto now_state = getNowState();
         mpc_->setCurrent(now_state);
         mpc_->solve();
+        auto output = mpc_->getOutput();
         if (use_control_output_) {
-            Eigen::VectorXd output = mpc_->getOutput();
-
-            double yaw = orientationToYaw(current.pose.orientation);
-
-            double vx_world = output(0);
-            double vy_world = output(1);
-
+            double yaw = now_state.yaw;
+            double vx_world = output.vel.x();
+            double vy_world = output.vel.y();
             double vx_body = std::cos(yaw) * vx_world + std::sin(yaw) * vy_world;
             double vy_body = -std::sin(yaw) * vx_world + std::cos(yaw) * vy_world;
-
             geometry_msgs::msg::Twist cmd;
             cmd.linear.x = vx_body;
             cmd.linear.y = vy_body;
+
             cmd.angular.z = default_wz;
             cmd_vel_pub_->publish(cmd);
             std_msgs::msg::Float64 cmd_norm;
             cmd_norm.data = std::hypot(vx_world, vy_world);
             cmd_vel_norm_pub_->publish(cmd_norm);
-            publishVelocityArrow(Eigen::Vector2d(vx_world, vy_world), rclcpp::Clock().now());
         }
+        visualization_msgs::msg::Marker vel_marker;
+
+        vel_marker.header.frame_id = target_frame_;
+        vel_marker.header.stamp = node_->get_clock()->now();
+        output.fillVelocityArrow(vel_marker, current_odom_);
+
+        vel_marker_pub_->publish(vel_marker);
 
         nav_msgs::msg::Path predict_path;
         predict_path.header.frame_id = target_frame_;
         predict_path.header.stamp = rclcpp::Clock().now();
-        geometry_msgs::msg::PoseStamped pose_msg;
-        for (int i = 0; i < mpc_->T_; ++i) {
-            pose_msg.header = predict_path.header;
-            pose_msg.pose.position.x = mpc_->xopt_[i].pos.x();
-            pose_msg.pose.position.y = mpc_->xopt_[i].pos.y();
-            pose_msg.pose.position.z = current.pose.position.z;
-            double yaw = std::hypot(mpc_->xopt_[i].vel.x(), mpc_->xopt_[i].vel.y()) > 1e-3
-                ? std::atan2(mpc_->xopt_[i].vel.y(), mpc_->xopt_[i].vel.x())
-                : 0.0;
-            tf2::Quaternion q;
-            q.setRPY(0, 0, yaw);
-            q.normalize();
-            pose_msg.pose.orientation = tf2::toMsg(q);
-            predict_path.poses.push_back(pose_msg);
-        }
-        // for (int i = 0; i < mpc_->T_; ++i) {
-        //     pose_msg.header = predict_path.header;
-        //     pose_msg.pose.position.x = mpc_->P_[i].pos.x();
-        //     pose_msg.pose.position.y = mpc_->P_[i].pos.y();
-        //     pose_msg.pose.position.z = current.pose.position.z;
-        //     double yaw = std::hypot(mpc_->P_[i].vel.x(), mpc_->P_[i].vel.y()) > 1e-3
-        //         ? std::atan2(mpc_->P_[i].vel.y(), mpc_->P_[i].vel.x())
-        //         : 0.0;
-        //     tf2::Quaternion q;
-        //     q.setRPY(0, 0, yaw);
-        //     q.normalize();
-        //     pose_msg.pose.orientation = tf2::toMsg(q);
-        //     predict_path.poses.push_back(pose_msg);
-        // }
+        output.fillPath(predict_path, current_odom_);
         predict_path_pub_->publish(predict_path);
     }
     std::vector<int> checkSafePath(const std::vector<Eigen::Vector2d>& path) {
         std::vector<int> unsafe_points;
+
         if (path.size() < 2)
             return unsafe_points;
 
-        const double step =
-            std::min(rose_map_->acc_map_info_.voxel_size * 0.5, parameters_.robot_radius * 0.5);
+        if (!rose_map_ || !rose_map_->esdf_ || !rose_map_->esdf_->esdf_)
+            return unsafe_points;
 
-        for (int i = 0; i + 1 < path.size(); ++i) {
-            const Eigen::Vector2d& p0 = path[i];
-            const Eigen::Vector2d& p1 = path[i + 1];
+        const auto& esdf = rose_map_->esdf_;
+
+        const double step = std::min(esdf->esdf_->voxel_size * 0.5, parameters_.robot_radius * 0.5);
+
+        if (step <= 1e-6)
+            return unsafe_points;
+
+        for (size_t i = 0; i + 1 < path.size(); ++i) {
+            const Eigen::Vector2d p0 = path[i];
+            const Eigen::Vector2d p1 = path[i + 1];
 
             const double seg_len = (p1 - p0).norm();
-            const int n = std::max(1, static_cast<int>(std::ceil(seg_len / step)));
+            const int n = std::max(1, (int)std::ceil(seg_len / step));
 
             bool unsafe = false;
 
             for (int k = 0; k <= n; ++k) {
-                double alpha = static_cast<double>(k) / n;
+                double alpha = (double)k / n;
                 Eigen::Vector2d p = p0 + alpha * (p1 - p0);
 
-                auto key = rose_map_->worldToKey2D(p.cast<float>());
-                int idx = rose_map_->key2DToIndex2D(key);
+                auto key = esdf->worldToKey(p.cast<float>());
+                int idx = esdf->keyToIndex(key);
+
                 if (idx < 0)
                     continue;
 
-                if (rose_map_->esdf_[idx] < parameters_.robot_radius) {
+                if (esdf->getEsdf(idx) < parameters_.robot_radius) {
                     unsafe = true;
                     break;
                 }
             }
 
-            if (unsafe) {
+            if (unsafe)
                 unsafe_points.push_back(i);
-            }
         }
 
         return unsafe_points;
@@ -526,7 +478,7 @@ public:
 
         int local_end_idx = unsafe_points.empty()
             ? findHeadPointIndex(start_w, current_raw_path_)
-            : unsafe_points.back() + (1 / rose_map_->acc_map_info_.voxel_size);
+            : unsafe_points.back() + (1 / rose_map_->esdf_->esdf_->voxel_size);
 
         local_end_idx = std::clamp(local_end_idx, 0, Num - 1);
 
@@ -564,7 +516,7 @@ public:
 
         const double stitch_dist =
             TrajectorySampler2D::segmentLength(local_path.back(), path_after.front());
-        if (stitch_dist > 1.0) { // 若跳变过大，插值一个过渡点
+        if (stitch_dist > 1.0) {
             Eigen::Vector2d mid = 0.5 * (local_path.back() + path_after.front());
             local_path.emplace_back(mid);
             RCLCPP_INFO(node_->get_logger(), "Inserted stitch midpoint for smooth connection.");
@@ -595,12 +547,6 @@ public:
         }
         auto backup = current_raw_path_;
         current_raw_path_.swap(filtered);
-
-        // RCLCPP_INFO(
-        //     node_->get_logger(),
-        //     "Local replan succeeded (%zu new pts), optimizing trajectory.",
-        //     local_path.size()
-        // );
         bool opt_ok = false;
         try {
             resampleAndOpt(current_raw_path_);
@@ -635,9 +581,7 @@ public:
             double dx = current_path[i].x() - start_w.x();
             double dy = current_path[i].y() - start_w.y();
             double dist2 = dx * dx + dy * dy;
-
             double diff2 = std::abs(dist2 - TARGET_DIST2);
-
             if (diff2 < best_diff2) {
                 best_diff2 = diff2;
                 best_index = i;
@@ -752,7 +696,7 @@ public:
             }
             raw_path_pub_->publish(raw_path_msg);
         }
-        traj_opt_->setSampledPath(traj, parameters_.resampler_params_.dt, start_v.cast<double>());
+        traj_opt_->setSampledPath(traj, parameters_.resampler_params_.dt, getNowState());
 
         traj_opt_->optimize();
         auto opt_traj = traj_opt_->getTrajectory();
@@ -827,17 +771,12 @@ public:
     }
 
     void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
-        try {
-            auto tf =
-                tf_buffer_.lookupTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
-            T = tf2ToEigen(tf);
-        } catch (...) {
-            RCLCPP_WARN(node_->get_logger(), "[TF] goalPoseCallback transform failed → identity");
+        auto T = tf_->getTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
+        if (!T.has_value()) {
+            return;
         }
-
         Eigen::Vector4f p(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, 1.0f);
-        p = T * p;
+        p = T.value() * p;
         geometry_msgs::msg::PoseStamped goal_out = *msg;
         goal_out.header.frame_id = target_frame_;
         goal_out.pose.position.x = p.x();
@@ -856,16 +795,9 @@ public:
     }
 
     void goalPointCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
-        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
-        try {
-            auto tf =
-                tf_buffer_.lookupTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
-            T = tf2ToEigen(tf);
-        } catch (...) {
-            RCLCPP_WARN(node_->get_logger(), "[TF] goalPointCallback transform failed → identity");
-        }
+        auto T = tf_->getTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
         Eigen::Vector4f p(msg->point.x, msg->point.y, msg->point.z, 1.0f);
-        p = T * p;
+        p = T.value() * p;
         geometry_msgs::msg::PoseStamped pose;
         pose.header = msg->header;
         pose.header.frame_id = target_frame_;
@@ -887,93 +819,85 @@ public:
     }
 
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        rose_map_->odomCallback(msg);
+
         const auto& odom_in = *msg;
 
-        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
-        tf2::Transform tf2_T = tf2::Transform::getIdentity();
-        tf2::Quaternion q_in;
+        Eigen::Isometry3f T = Eigen::Isometry3f::Identity();
 
-        try {
-            auto tf = tf_buffer_.lookupTransform(
-                target_frame_,
-                odom_in.header.frame_id,
-                odom_in.header.stamp
-            );
-            T = tf2ToEigen(tf);
-            tf2::fromMsg(tf.transform, tf2_T);
+        auto T_opt =
+            tf_->getTransform(target_frame_, odom_in.header.frame_id, odom_in.header.stamp);
 
-            tf2::fromMsg(odom_in.pose.pose.orientation, q_in);
-            q_in = tf2_T.getRotation() * q_in;
-            q_in.normalize();
-        } catch (...) {
+        if (T_opt.has_value()) {
+            T = *T_opt;
+        } else {
             RCLCPP_WARN(node_->get_logger(), "[TF] odomCallback transform failed → identity");
-            tf2::fromMsg(odom_in.pose.pose.orientation, q_in);
+            return;
         }
 
-        Eigen::Vector4f p(
+        Eigen::Vector3f p(
             odom_in.pose.pose.position.x,
             odom_in.pose.pose.position.y,
-            odom_in.pose.pose.position.z,
-            1.0f
+            odom_in.pose.pose.position.z
         );
-        p = T * p;
 
+        p = T * p;
+        Eigen::Quaternionf q_in(
+            odom_in.pose.pose.orientation.w,
+            odom_in.pose.pose.orientation.x,
+            odom_in.pose.pose.orientation.y,
+            odom_in.pose.pose.orientation.z
+        );
+
+        Eigen::Quaternionf q_out(T.rotation() * q_in);
+        q_out.normalize();
         geometry_msgs::msg::PoseStamped pose_out;
+        pose_out.header = odom_in.header;
+        pose_out.header.frame_id = target_frame_;
+
         pose_out.pose.position.x = p.x();
         pose_out.pose.position.y = p.y();
         pose_out.pose.position.z = p.z();
-        pose_out.pose.orientation = tf2::toMsg(q_in);
-        pose_out.header = odom_in.header;
+        pose_out.pose.orientation.x = q_out.x();
+        pose_out.pose.orientation.y = q_out.y();
+        pose_out.pose.orientation.z = q_out.z();
+        pose_out.pose.orientation.w = q_out.w();
         current_pose_ = pose_out;
+        Eigen::Matrix3f R = T.rotation();
 
-        tf2::Vector3 vlin(
+        Eigen::Vector3f vlin(
             odom_in.twist.twist.linear.x,
             odom_in.twist.twist.linear.y,
             odom_in.twist.twist.linear.z
         );
-        vlin = tf2_T.getBasis() * vlin;
 
-        tf2::Vector3 vang(
+        Eigen::Vector3f vang(
             odom_in.twist.twist.angular.x,
             odom_in.twist.twist.angular.y,
             odom_in.twist.twist.angular.z
         );
-        vang = tf2_T.getBasis() * vang;
+
+        vlin = R * vlin;
+        vang = R * vang;
 
         nav_msgs::msg::Odometry odom_out = odom_in;
         odom_out.header.frame_id = target_frame_;
-        odom_out.pose.pose.position.x = p.x();
-        odom_out.pose.pose.position.y = p.y();
-        odom_out.pose.pose.position.z = p.z();
-        odom_out.pose.pose.orientation = tf2::toMsg(q_in);
+        odom_out.pose.pose = pose_out.pose;
 
         odom_out.twist.twist.linear.x = vlin.x();
         odom_out.twist.twist.linear.y = vlin.y();
         odom_out.twist.twist.linear.z = vlin.z();
+
         odom_out.twist.twist.angular.x = vang.x();
         odom_out.twist.twist.angular.y = vang.y();
         odom_out.twist.twist.angular.z = vang.z();
 
         current_odom_ = odom_out;
-
-        rose_map_->setOrigin(Eigen::Vector3f(p.x(), p.y(), p.z()));
-    }
-
-    Eigen::Matrix4f tf2ToEigen(const geometry_msgs::msg::TransformStamped& tf) {
-        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
-        const auto& t = tf.transform.translation;
-        const auto& q = tf.transform.rotation;
-        Eigen::Quaternionf Q(q.w, q.x, q.y, q.z);
-        T.block<3, 3>(0, 0) = Q.toRotationMatrix();
-        T(0, 3) = t.x;
-        T(1, 3) = t.y;
-        T(2, 3) = t.z;
-        return T;
     }
 
     Parameters parameters_;
     rclcpp::Node* node_;
-
+    TF::Ptr tf_;
     SearchType::Ptr path_search_;
     rose_map::RoseMap::Ptr rose_map_;
     TrajectoryOpt::Ptr traj_opt_;
@@ -1005,8 +929,6 @@ public:
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr cmd_vel_norm_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr vel_marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr opt_marker_pub_;
-    tf2_ros::Buffer tf_buffer_;
-    tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
 };
 
 RosePlanner::RosePlanner(rclcpp::Node& node) {

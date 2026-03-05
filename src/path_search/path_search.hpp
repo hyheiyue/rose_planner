@@ -24,9 +24,8 @@ public:
         return std::make_shared<PathSearch>(rose_map, params);
     }
 
-    bool checkStartGoalSafe(rose_map::VoxelKey2D& start, rose_map::VoxelKey2D& goal) {
+    bool checkStartGoalSafe(rose_map::VoxelKey<2>& start, rose_map::VoxelKey<2>& goal) {
         if (isOccupied(start)) {
-            // if (!findNearestSafe(start, start))
             return false;
         }
         if (isOccupied(goal)) {
@@ -37,27 +36,27 @@ public:
         return true;
     }
     bool findNearestSafe(const Eigen::Vector2f& raw, Eigen::Vector2f& safe) const {
-        rose_map::VoxelKey2D a = rose_map_->worldToKey2D(raw);
-        rose_map::VoxelKey2D b;
+        rose_map::VoxelKey<2> a = rose_map_->esdf_->worldToKey(raw);
+        rose_map::VoxelKey<2> b;
         if (findNearestSafe(a, b)) {
-            auto w = rose_map_->key2DToWorld(b);
+            auto w = rose_map_->esdf_->keyToWorld(b);
             safe = Eigen::Vector2f(w.x(), w.y());
             return true;
         }
         return false;
     }
-    bool isOccupied(const rose_map::VoxelKey2D& k) const {
-        int idx = rose_map_->key2DToIndex2D(k);
+    bool isOccupied(const rose_map::VoxelKey<2>& k) const {
+        int idx = rose_map_->esdf_->keyToIndex(k);
         if (idx < 0)
             return false;
-        return rose_map_->esdf_[idx] < robot_radius_;
+        return rose_map_->esdf_->getEsdf(idx) < robot_radius_;
     }
 
-    bool findNearestSafe(const rose_map::VoxelKey2D& seed, rose_map::VoxelKey2D& out) const {
-        std::queue<rose_map::VoxelKey2D> q;
+    bool findNearestSafe(const rose_map::VoxelKey<2>& seed, rose_map::VoxelKey<2>& out) const {
+        std::queue<rose_map::VoxelKey<2>> q;
         std::unordered_set<int64_t> vis;
-        auto hash = [&](const rose_map::VoxelKey2D& k) -> int64_t {
-            return (int64_t(k.x) << 32) | uint32_t(k.y);
+        auto hash = [&](const rose_map::VoxelKey<2>& k) -> int64_t {
+            return (int64_t(k.x()) << 32) | uint32_t(k.y());
         };
 
         q.push(seed);
@@ -75,7 +74,7 @@ public:
                 return true;
             }
             for (int i = 0; i < 8; i++) {
-                rose_map::VoxelKey2D nb { c.x + dx[i], c.y + dy[i] };
+                rose_map::VoxelKey<2> nb { c.x() + dx[i], c.y() + dy[i] };
                 auto h = hash(nb);
                 if (!vis.count(h)) {
                     vis.insert(h);

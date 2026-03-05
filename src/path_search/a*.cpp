@@ -2,15 +2,16 @@
 namespace rose_planner {
 SearchState
 AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Path& path) {
-    auto start = rose_map_->worldToKey2D(start_w);
-    auto goal = rose_map_->worldToKey2D(goal_w);
+    const auto& esdf = rose_map_->esdf_;
+    auto start = esdf->worldToKey(start_w);
+    auto goal = esdf->worldToKey(goal_w);
 
     if (!PathSearch::checkStartGoalSafe(start, goal)) {
         return SearchState::NO_PATH;
     }
 
     nodes_.clear();
-    const int esdf_size = static_cast<int>(rose_map_->esdf_.size());
+    const int esdf_size = static_cast<int>(esdf->esdf_->gridSize());
     if (esdf_size <= 0)
         return SearchState::NO_PATH;
 
@@ -19,8 +20,8 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
 
     std::priority_queue<PQItem, std::vector<PQItem>, PQComp> open;
 
-    int start_idx = rose_map_->key2DToIndex2D(start);
-    int goal_idx = rose_map_->key2DToIndex2D(goal);
+    int start_idx = esdf->keyToIndex(start);
+    int goal_idx = esdf->keyToIndex(goal);
     if (start_idx < 0)
         return SearchState::NO_PATH;
     bool goal_projected = false;
@@ -28,14 +29,14 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
     if (goal_idx < 0) {
         if (projectGoalToMapBoundary(start_w, goal_w, projected_goal_w)) {
             goal_projected = true;
-            goal = rose_map_->worldToKey2D(projected_goal_w);
+            goal = esdf->worldToKey(projected_goal_w);
         }
     }
 
     Node sn;
     sn.key = start;
     sn.g = 0.0f;
-    sn.esdf = rose_map_->esdf_[start_idx];
+    sn.esdf = esdf->getEsdf(start_idx);
     float h_start = heuristicCached(sn.esdf, start, goal);
     sn.f = sn.g + h_start;
     sn.parent = -1;
@@ -45,11 +46,11 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
     open.push({ 0, sn.f, h_start });
 
     const float heu_weight = params_.path_search_params_.a_star.heuristic_weight;
-    const int max_iters = 10000000;
+    constexpr int max_iters = 10000000;
     int iters = 0;
     auto t0 = std::chrono::steady_clock::now();
-    const float max_time = 1.0f;
-    const int time_check_interval = 256;
+    constexpr float max_time = 1.0f;
+    constexpr int time_check_interval = 256;
 
     while (!open.empty()) {
         iters++;
@@ -73,7 +74,7 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
             path.clear();
 
             for (int id = cid; id >= 0; id = nodes_[id].parent) {
-                auto w = rose_map_->key2DToWorld(nodes_[id].key);
+                auto w = esdf->keyToWorld(nodes_[id].key);
                 path.push_back({ w.x(), w.y() });
             }
 
@@ -88,15 +89,16 @@ AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Pat
         getSuccessors(nodes_[cid].key, succ_buffer_);
 
         for (const auto& nbk: succ_buffer_) {
-            int nb_idx = rose_map_->key2DToIndex2D(nbk);
+            int nb_idx = esdf->keyToIndex(nbk);
             if (nb_idx < 0 || nb_idx >= esdf_size)
                 continue;
 
             float base =
-                (std::abs(nodes_[cid].key.x - nbk.x) + std::abs(nodes_[cid].key.y - nbk.y) == 1)
+                (std::abs(nodes_[cid].key.x() - nbk.x()) + std::abs(nodes_[cid].key.y() - nbk.y())
+                 == 1)
                 ? 1.0f
                 : 1.41421356f;
-            float d = rose_map_->esdf_[nb_idx];
+            float d = esdf->getEsdf(nb_idx);
             float step_cost = base
                 + params_.path_search_params_.a_star.obstacle_penalty_weight * (1.0f / (d + 0.1f));
 

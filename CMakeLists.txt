@@ -32,11 +32,15 @@ find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(OsqpEigen REQUIRED)
 find_package(osqp REQUIRED)
-# find_package(qpOASES REQUIRED)
 set(OSQP_LIB_PATH /usr/local/lib/libosqp.so)  
 include_directories(/usr/local/include/osqp)  
 message(STATUS "Using manually specified OSQP C library: ${OSQP_LIB_PATH}")
-# include_directories(/usr/local/include/qpOASES)
+
+
+# find_package(ACADO REQUIRED)
+# add_library(ACADO STATIC IMPORTED)
+# include_directories(omni_model)
+# set_target_properties(ACADO PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/omni_model/libacado_exported_rti.a")
 
 
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
@@ -47,7 +51,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${OpenCV_INCLUDE_DIRS}
     ${OSQP_LNC_PATH}
-    
+    # ${ACADO_INCLUDE_DIR}
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -57,7 +61,8 @@ target_link_libraries(${PROJECT_NAME}
     ${CERES_LIBRARIES}
     ${OSQP_LIB_PATH}
     OsqpEigen::OsqpEigen
-    # qpOASES
+    # ${ACADO_SHARED_LIBRARIES}
+    # ACADO
     
 )
 ament_target_dependencies(${PROJECT_NAME}

@@ -1,7 +1,7 @@
 #pragma once
 #include "../common.hpp"
 #include "../parameters.hpp"
-#include "cubic_spline.hpp"
+#include "control/type.hpp"
 #include "flatness.hpp"
 #include "lbfgs.hpp"
 #include "minco.hpp"
@@ -31,7 +31,7 @@ public:
     void setSampledPath(
         const std::vector<SampleTrajectoryPoint>& sampled,
         double sample_dt,
-        Eigen::Vector2d init_v = Eigen::Vector2d(0, 0)
+        control::State now
     ) {
         if (sampled.size() < 5) {
             ctx_.skip = true;
@@ -47,10 +47,7 @@ public:
         ctx_.sample_dt = sample_dt;
         ctx_.init_obs = true;
         Eigen::Matrix<double, 2, 3> headState;
-        init_v = Eigen::Vector2d::Zero();
-        // init_v = sampled[1].v.cast<double>();
-        // init_v = init_v.normalized() * std::max(init_v.norm(), 1.0);
-        headState << ctx_.head_pos, init_v, Eigen::Vector2d::Zero();
+        headState << now.pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
         Eigen::Matrix<double, 2, 3> tailState;
         tailState << ctx_.tail_pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
         minco_.setConditions(
@@ -146,7 +143,6 @@ public:
         );
 
         if (ret >= 0 || ret == lbfgs::LBFGSERR_MAXIMUMLINESEARCH) {
-            // std::cout << "[Smooth Optimize] OK: " << lbfgs::lbfgs_strerror(ret) << std::endl;
             for (int i = 0; i < ctrlNum; ++i) {
                 ctx_.path[i + 1].x() = x(i);
                 ctx_.path[i + 1].y() = x(i + ctrlNum);
@@ -309,24 +305,24 @@ public:
         const {
         if (!rose_map_)
             return false;
-
-        const double vs = rose_map_->acc_map_info_.voxel_size;
+        const auto& esdf = rose_map_->esdf_;
+        const double vs = esdf->esdf_->voxel_size;
         if (vs <= 0.0)
             return false;
 
         const double R = 1.0;
 
         Eigen::Vector2f pos2f(pos.x(), pos.y());
-        auto key = rose_map_->worldToKey2D(pos2f);
-        if (rose_map_->key2DToIndex2D(key) < 0)
+        auto key = esdf->worldToKey(pos2f);
+        if (esdf->keyToIndex(key) < 0)
             return false;
         auto read = [&](int dx, int dy) {
-            rose_map::VoxelKey2D k { key.x + dx, key.y + dy };
-            int idx = rose_map_->key2DToIndex2D(k);
+            rose_map::VoxelKey<2> k { key.x() + dx, key.y() + dy };
+            int idx = esdf->keyToIndex(k);
             if (idx < 0)
                 return R + 1.0;
 
-            double d = rose_map_->esdf_[idx];
+            double d = esdf->getEsdf(idx);
             if (!std::isfinite(d))
                 return R + 1.0;
 
@@ -340,8 +336,8 @@ public:
             }
         }
 
-        double fx = (pos2f.x() - (key.x + 0.5) * vs) / vs + 0.5;
-        double fy = (pos2f.y() - (key.y + 0.5) * vs) / vs + 0.5;
+        double fx = (pos2f.x() - (key.x() + 0.5) * vs) / vs + 0.5;
+        double fy = (pos2f.y() - (key.y() + 0.5) * vs) / vs + 0.5;
 
         fx = std::clamp(fx, 0.0, 1.0);
         fy = std::clamp(fy, 0.0, 1.0);

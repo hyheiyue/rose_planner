@@ -25,7 +25,7 @@ public:
     }
 
     struct Node {
-        rose_map::VoxelKey2D key;
+        rose_map::VoxelKey<2> key;
         float g = 0.0f;
         float f = 0.0f;
         int parent = -1;
@@ -52,26 +52,28 @@ public:
 
 private:
     std::vector<Node> nodes_;
-    mutable std::vector<rose_map::VoxelKey2D> succ_buffer_;
+    mutable std::vector<rose_map::VoxelKey<2>> succ_buffer_;
 
     inline float
-    heuristicCached(float esdf_val, const rose_map::VoxelKey2D& a, const rose_map::VoxelKey2D& b)
+    heuristicCached(float esdf_val, const rose_map::VoxelKey<2>& a, const rose_map::VoxelKey<2>& b)
         const {
-        float dx = float(a.x - b.x);
-        float dy = float(a.y - b.y);
+        float dx = float(a.x() - b.x());
+        float dy = float(a.y() - b.y());
         float dist = std::sqrt(dx * dx + dy * dy);
         float clearance =
             params_.path_search_params_.a_star.clearance_weight * (1.0f / (esdf_val + 0.1f));
         return dist + clearance;
     }
 
-    inline void
-    getSuccessors(const rose_map::VoxelKey2D& cur, std::vector<rose_map::VoxelKey2D>& succ) const {
+    inline void getSuccessors(
+        const rose_map::VoxelKey<2>& cur,
+        std::vector<rose_map::VoxelKey<2>>& succ
+    ) const {
         succ.clear();
         static const int dx[8] = { 1, -1, 0, 0, 1, 1, -1, -1 };
         static const int dy[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };
         for (int i = 0; i < 8; i++) {
-            rose_map::VoxelKey2D nb { cur.x + dx[i], cur.y + dy[i] };
+            rose_map::VoxelKey<2> nb { cur.x() + dx[i], cur.y() + dy[i] };
             if (!isOccupied(nb))
                 succ.push_back(nb);
         }
@@ -89,15 +91,15 @@ private:
         dir /= len;
 
         // 步长：1/2 个 voxel
-        float step = 0.5f * rose_map_->acc_map_info_.voxel_size;
+        float step = 0.5f * rose_map_->esdf_->esdf_->voxel_size;
         float t = 0.0f;
 
         Eigen::Vector2f last_inside = start_w;
 
         while (t <= len) {
             Eigen::Vector2f p = start_w + dir * t;
-            auto key = rose_map_->worldToKey2D(p);
-            int idx = rose_map_->key2DToIndex2D(key);
+            auto key = rose_map_->esdf_->worldToKey(p);
+            int idx = rose_map_->esdf_->keyToIndex(key);
             if (idx < 0) {
                 projected_goal_w = last_inside;
                 return true;
