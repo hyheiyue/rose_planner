@@ -15,10 +15,11 @@ public:
         resampler_params_.load(root.sub("resampler"));
 
         robot_size = root.getEigenVector<2, float>("robot_size");
-
+        target_frame = root.declare<std::string>("target_frame");
         robot_radius =
             0.5f * std::sqrt(robot_size.x() * robot_size.x() + robot_size.y() * robot_size.y());
     }
+    std::string target_frame;
 
     Eigen::Vector2f robot_size = Eigen::Vector2f(0.5f, 0.5f);
     double robot_radius { 0.0 };

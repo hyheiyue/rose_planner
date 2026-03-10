@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.hpp"
 #include <Eigen/Dense>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -7,12 +8,6 @@
 #include <visualization_msgs/msg/marker.hpp>
 namespace rose_planner {
 namespace control {
-    class State {
-    public:
-        Eigen::Vector2d pos;
-        Eigen::Vector2d vel;
-        double yaw;
-    };
 
     class TrajPoint {
     public:
@@ -26,17 +21,14 @@ namespace control {
     public:
         Eigen::Vector2d vel;
         double w;
-        std::vector<State> pred_states;
-        void fillPath(
-            nav_msgs::msg::Path& predict_path,
-            const nav_msgs::msg::Odometry& current_odom
-        ) const {
+        std::vector<RoboState> pred_states;
+        void fillPath(nav_msgs::msg::Path& predict_path, const RoboState& current) const {
             geometry_msgs::msg::PoseStamped pose_msg;
             for (int i = 0; i < pred_states.size(); ++i) {
                 pose_msg.header = predict_path.header;
                 pose_msg.pose.position.x = pred_states[i].pos.x();
                 pose_msg.pose.position.y = pred_states[i].pos.y();
-                pose_msg.pose.position.z = current_odom.pose.pose.position.z;
+                pose_msg.pose.position.z = 0.0;
                 double yaw = std::hypot(pred_states[i].vel.x(), pred_states[i].vel.y()) > 1e-3
                     ? std::atan2(pred_states[i].vel.y(), pred_states[i].vel.x())
                     : 0.0;
@@ -47,24 +39,23 @@ namespace control {
                 predict_path.poses.push_back(pose_msg);
             }
         }
-        void fillVelocityArrow(
-            visualization_msgs::msg::Marker& marker,
-            const nav_msgs::msg::Odometry& current_odom
-        ) const {
+        void
+        fillVelocityArrow(visualization_msgs::msg::Marker& marker, const RoboState& current) const {
             marker.ns = "mpc_velocity";
             marker.id = 0;
 
             marker.type = visualization_msgs::msg::Marker::ARROW;
             marker.action = visualization_msgs::msg::Marker::ADD;
+            auto pos = current.pos.cast<float>();
             geometry_msgs::msg::Point p_start, p_end;
-            p_start.x = current_odom.pose.pose.position.x;
-            p_start.y = current_odom.pose.pose.position.y;
-            p_start.z = current_odom.pose.pose.position.z;
+            p_start.x = pos.x();
+            p_start.y = pos.y();
+            p_start.z = 0.0;
             double scale = 3.0;
             auto vel_normalized = vel.normalized();
-            p_end.x = current_odom.pose.pose.position.x + scale * vel_normalized.x();
-            p_end.y = current_odom.pose.pose.position.y + scale * vel_normalized.y();
-            p_end.z = current_odom.pose.pose.position.z;
+            p_end.x = pos.x() + scale * vel_normalized.x();
+            p_end.y = pos.y() + scale * vel_normalized.y();
+            p_end.z = 0.0;
 
             marker.points.push_back(p_start);
             marker.points.push_back(p_end);

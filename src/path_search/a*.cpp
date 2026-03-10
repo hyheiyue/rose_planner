@@ -1,7 +1,9 @@
 #include "a*.hpp"
 namespace rose_planner {
 SearchState
-AStar::search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Path& path) {
+AStar::search(const Eigen::Vector2d& _start_w, const Eigen::Vector2d& _goal_w, Path& path) {
+    auto start_w = _start_w.cast<float>();
+    auto goal_w = _goal_w.cast<float>();
     const auto& esdf = rose_map_->esdf_;
     auto start = esdf->worldToKey(start_w);
     auto goal = esdf->worldToKey(goal_w);

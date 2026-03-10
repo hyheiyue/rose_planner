@@ -48,7 +48,7 @@ public:
         }
     };
 
-    SearchState search(const Eigen::Vector2f& start_w, const Eigen::Vector2f& goal_w, Path& path);
+    SearchState search(const Eigen::Vector2d& start_w, const Eigen::Vector2d& goal_w, Path& path);
 
 private:
     std::vector<Node> nodes_;
