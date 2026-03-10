@@ -11,10 +11,10 @@
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/publisher.hpp>
 #include <sentry_interfase/msg/detail/nav_state__struct.hpp>
+#include <sentry_interfase/msg/nav_state.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker.hpp>
-#include <sentry_interfase/msg/nav_state.hpp>
 //clang-format off
 #include "control/acado_mpc.hpp"
 //clang-format on
@@ -220,10 +220,9 @@ public:
         nav_state.pose_in_map.position.x = now_state.pos.x();
         nav_state.pose_in_map.position.z = 0.0;
         nav_state.pose_in_map.position.y = now_state.pos.y();
-        bool reached = last_state==PlannerManager::FSMSTATE::WAIT_GOAL;
+        bool reached = last_state == PlannerManager::FSMSTATE::WAIT_GOAL;
         nav_state.reached_goal = reached;
         nav_state_pub_->publish(nav_state);
-
     }
 
     void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {

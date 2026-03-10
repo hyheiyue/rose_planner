@@ -12,7 +12,6 @@ public:
         path_search_params_.load(root.sub("path_search"));
         opt_params.load(root.sub("trajectory_opt"));
         mpc_params.load(root.sub("mpc_control"));
-        resampler_params_.load(root.sub("resampler"));
 
         robot_size = root.getEigenVector<2, float>("robot_size");
         target_frame = root.declare<std::string>("target_frame");
@@ -27,14 +26,13 @@ public:
     struct OptParams {
         double smooth_weight = 1.0;
         double obstacle_weight = 1.0;
-        double time_weight = 1.0;
-        double base_scale = 1.0;
-
+        double sample_ds = 0.3;
+        double expected_speed = 2.5;
         void load(const ParamHelper& ph) {
             smooth_weight = ph.declare<double>("smooth_weight");
             obstacle_weight = ph.declare("obstacle_weight", obstacle_weight);
-            time_weight = ph.declare("time_weight", time_weight);
-            base_scale = ph.declare("base_scale", base_scale);
+            expected_speed = ph.declare("expected_speed", expected_speed);
+            sample_ds = ph.declare("sample_ds", sample_ds);
         }
     } opt_params;
 
@@ -65,18 +63,6 @@ public:
             R = ph.declare<std::vector<double>>("R");
         }
     } mpc_params;
-
-    struct ReSampler {
-        float expected_speed = 3.0f;
-        float max_acc = 2.0f;
-        float dt = 0.1f;
-
-        void load(const ParamHelper& ph) {
-            expected_speed = ph.declare("expected_speed", expected_speed);
-            max_acc = ph.declare("max_acc", max_acc);
-            dt = ph.declare("dt", dt);
-        }
-    } resampler_params_;
 
     struct PathSearchParams {
         struct AStar {

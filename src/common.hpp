@@ -20,11 +20,6 @@ inline double orientationToYaw(const geometry_msgs::msg::Quaternion& q) noexcept
     last_yaw_ = yaw;
     return yaw;
 }
-struct SampleTrajectoryPoint {
-    Eigen::Vector2d p;
-    Eigen::Vector2d v;
-    double t;
-};
 class RoboState {
 public:
     Eigen::Vector2d pos;

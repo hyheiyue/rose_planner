@@ -1,7 +1,6 @@
 #include "planner_manager.hpp"
 #include "path_search/a*.hpp"
 #include "trajectory_optimize/trajectory_opt.hpp"
-#include "trajectory_optimize/trajectory_sampler.hpp"
 namespace rose_planner {
 struct PlannerManager::Impl {
 public:
@@ -18,7 +17,6 @@ public:
         rose_map_ = rose_map;
         path_search_ = AStar::create(rose_map_, params_);
         traj_opt_ = TrajectoryOpt::create(rose_map_, params_);
-        traj_sampler_ = TrajectorySampler2D::create(params_);
         state_ = FSMSTATE::INIT;
         timer_thread_ = std::thread([this]() {
             while (rclcpp::ok()) {
@@ -306,33 +304,20 @@ public:
         opt_path_msg.header.frame_id = params_.target_frame;
         auto current = robo_->getNowState();
         Eigen::Vector2d start_v = current.vel;
-        std::vector<Eigen::Vector2d> _path;
-        _path.push_back(current.pos);
-        _path.insert(_path.end(), path.begin(), path.end());
-        auto traj = traj_sampler_->sampleTrapezoid(_path, start_v);
-        const double sample_dt = params_.resampler_params_.dt;
         // Publish raw path
         if (raw_path_pub_->get_subscription_count() > 0) {
-            for (int i = 0; i < (int)traj.size(); i = i + 3) {
+            for (int i = 0; i < (int)path.size(); i = i + 3) {
                 geometry_msgs::msg::PoseStamped pose_msg;
                 pose_msg.header = raw_path_msg.header;
-                pose_msg.pose.position.x = traj[i].p.x();
-                pose_msg.pose.position.y = traj[i].p.y();
+                pose_msg.pose.position.x = path[i].x();
+                pose_msg.pose.position.y = path[i].y();
                 pose_msg.pose.position.z = 0.0;
-                double yaw = std::atan2(traj[i].v.y(), traj[i].v.x());
-                tf2::Quaternion q;
-                q.setRPY(0, 0, yaw);
-                q.normalize();
-                pose_msg.pose.orientation.x = q.x();
-                pose_msg.pose.orientation.y = q.y();
-                pose_msg.pose.orientation.z = q.z();
-                pose_msg.pose.orientation.w = q.w();
 
                 raw_path_msg.poses.push_back(pose_msg);
             }
             raw_path_pub_->publish(raw_path_msg);
         }
-        traj_opt_->setSampledPath(traj, sample_dt, current);
+        traj_opt_->setPath(path, current);
         traj_opt_->optimize();
         auto opt_traj = traj_opt_->getTrajectory();
         if (opt_traj.getPieceNum() > 1 && opt_traj.getPieceNum() < 1000) {
@@ -345,7 +330,7 @@ public:
             && opt_traj.getPieceNum() > 1)
         {
             double totalDur = opt_traj.getTotalDuration();
-            double dt = sample_dt;
+            double dt = 0.1;
             int sampleNum = static_cast<int>(totalDur / dt) + 2;
 
             double t_cur = 0.0;
@@ -420,7 +405,6 @@ public:
     AStar::Ptr path_search_;
     rose_map::RoseMap::Ptr rose_map_;
     TrajectoryOpt::Ptr traj_opt_;
-    TrajectorySampler2D::Ptr traj_sampler_;
     Robo::Ptr robo_;
     Goal goal_;
     std::vector<Eigen::Vector2d> current_raw_path_;

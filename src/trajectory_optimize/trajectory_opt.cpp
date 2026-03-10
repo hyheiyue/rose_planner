@@ -5,35 +5,88 @@
 namespace rose_planner {
 struct TrajectoryOpt::Impl {
 public:
-    Impl(rose_map::RoseMap::Ptr rose_map, Parameters params): rose_map_(rose_map), params_(params) {
-        double base_scale = params_.opt_params.base_scale;
-        w_obs = params_.opt_params.obstacle_weight * base_scale;
-        w_smooth = params_.opt_params.smooth_weight * base_scale;
-        w_time = params_.opt_params.time_weight * base_scale;
-    }
+    Impl(rose_map::RoseMap::Ptr rose_map, Parameters params):
+        rose_map_(rose_map),
+        params_(params) {}
+    class SampleUniform {
+    public:
+        static std::vector<Eigen::Vector2d>
+        sampleUniform(const std::vector<Eigen::Vector2d>& path, double sample_ds) noexcept {
+            if (path.size() < 2)
+                return {};
 
-    void setSampledPath(
-        const std::vector<SampleTrajectoryPoint>& sampled,
-        double sample_dt,
-        RoboState now
-    ) {
-        if (sampled.size() < 5) {
+            auto s_map = computeArcLengths(path);
+
+            double s_total = s_map.back();
+
+            std::vector<Eigen::Vector2d> traj;
+
+            for (double s = 0.0; s <= s_total; s += sample_ds) {
+                Eigen::Vector2d p = interpolatePath(path, s_map, s);
+                traj.push_back({ p });
+            }
+
+            traj.push_back({ path.back() });
+
+            return traj;
+        }
+
+    public:
+        static std::vector<double> computeArcLengths(const std::vector<Eigen::Vector2d>& path
+        ) noexcept {
+            std::vector<double> s(path.size(), 0.0);
+
+            for (size_t i = 1; i < path.size(); ++i)
+                s[i] = s[i - 1] + (path[i] - path[i - 1]).norm();
+
+            return s;
+        }
+
+    private:
+        static Eigen::Vector2d interpolatePath(
+            const std::vector<Eigen::Vector2d>& path,
+            const std::vector<double>& s,
+            double s_q
+        ) noexcept {
+            if (s_q <= s.front())
+                return path.front();
+
+            if (s_q >= s.back())
+                return path.back();
+
+            auto it = std::lower_bound(s.begin(), s.end(), s_q);
+
+            int i = std::distance(s.begin(), it);
+
+            i = std::clamp(i, 1, static_cast<int>(s.size()) - 1);
+
+            double ds = s[i] - s[i - 1];
+
+            if (ds < 1e-6)
+                return path[i];
+
+            double r = (s_q - s[i - 1]) / ds;
+
+            return path[i - 1] * (1.0 - r) + path[i] * r;
+        }
+    };
+
+    void setPath(const std::vector<Eigen::Vector2d>& path, RoboState now) {
+        if (path.size() < 5) {
             ctx_.skip = true;
             return;
         }
+        const double sample_ds = params_.opt_params.sample_ds;
         ctx_.path.clear();
-        for (const auto& pt: sampled) {
-            ctx_.path.push_back(pt.p.cast<double>());
-        }
+        ctx_.path = SampleUniform::sampleUniform(path, sample_ds);
         ctx_.head_pos = ctx_.path[0];
         ctx_.tail_pos = ctx_.path[ctx_.path.size() - 1];
         ctx_.pieceNum = ctx_.path.size() - 1;
-        ctx_.sample_dt = sample_dt;
-        ctx_.init_obs = true;
         Eigen::Matrix<double, 2, 3> headState;
         headState << now.pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
         Eigen::Matrix<double, 2, 3> tailState;
         tailState << ctx_.tail_pos, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero();
+        const auto w_smooth = params_.opt_params.smooth_weight;
         minco_.setConditions(
             headState,
             tailState,
@@ -89,7 +142,7 @@ public:
         const int pieceNum = ctx_.pieceNum;
         const int ctrlNum = pieceNum - 1;
 
-        Eigen::VectorXd x(3 * pieceNum - 1);
+        Eigen::VectorXd x(2 * ctrlNum);
 
         for (int i = 0; i < ctrlNum; ++i) {
             x(i) = ctx_.path[i + 1].x();
@@ -98,13 +151,8 @@ public:
 
         ctx_.inTimes.resize(pieceNum);
         for (int i = 0; i < pieceNum; ++i) {
-            ctx_.inTimes(i) = ctx_.sample_dt;
+            ctx_.inTimes(i) = 0.3 / 2.0;
         }
-
-        Eigen::VectorXd virtualT(pieceNum);
-        RealT2VirtualT(ctx_.inTimes, virtualT);
-        const int timeOffset = 2 * ctrlNum;
-        x.segment(timeOffset, pieceNum) = virtualT;
         double minCost = 0.0;
         lbfgs_params_.mem_size = 256;
         lbfgs_params_.past = 20;
@@ -134,10 +182,6 @@ public:
             Eigen::Matrix2Xd inPs(2, ctrlNum);
             inPs.row(0) = x.head(ctrlNum).transpose();
             inPs.row(1) = x.segment(ctrlNum, ctrlNum).transpose();
-
-            virtualT = x.segment(timeOffset, pieceNum);
-
-            VirtualT2RealT(virtualT, ctx_.inTimes);
 
             minco_.setParameters(inPs, ctx_.inTimes);
             minco_.getTrajectory(finalTraj_);
@@ -170,13 +214,9 @@ public:
         idx += points_num;
         inPs.row(1) = x.segment(idx, points_num).transpose();
         idx += points_num;
-        Eigen::VectorXd t = x.segment(idx, pieceNum);
-        idx += pieceNum;
 
         Eigen::Matrix2Xd gradp = Eigen::Matrix2Xd::Zero(2, points_num);
         Eigen::VectorXd gradt = Eigen::VectorXd::Zero(pieceNum);
-
-        instance->VirtualT2RealT(t, instance->ctx_.inTimes);
 
         instance->minco_.setParameters(inPs, instance->ctx_.inTimes);
 
@@ -206,20 +246,13 @@ public:
             gradByTimes,
             gradByTailStateS
         );
-        gradByTimes += energyT_grad;
         cost_val += energy;
         gradp += energy_grad;
         gradp += gradByPoints;
         cost_val += instance->attachPenaltyFunctional(inPs, gradp);
-        cost_val += instance->w_time * instance->ctx_.inTimes.sum();
-        Eigen::VectorXd rhotimes;
-        rhotimes.resize(gradByTimes.size());
-        gradByTimes += instance->w_time * rhotimes.setOnes();
-        instance->backwardGradT(t, gradByTimes, gradt);
         g.setZero();
         g.segment(0, points_num) = gradp.row(0).transpose();
         g.segment(points_num, points_num) = gradp.row(1).transpose();
-        g.segment(2 * points_num, pieceNum) = gradt;
 
         return cost_val;
     }
@@ -273,7 +306,7 @@ public:
         if (d < safe_margin) {
             w_safe += 4.0 * (safe_margin - d) / safe_margin;
         }
-
+        const auto w_obs = params_.opt_params.obstacle_weight;
         nearest_cost = w_obs * cost_s1 * w_safe;
         Eigen::Vector2d dir = (g.norm() > 1e-6) ? g.normalized() : Eigen::Vector2d::Zero();
         grad = w_obs * dcost_s1 * w_safe * (-dir);
@@ -396,8 +429,6 @@ public:
         Eigen::Vector2d tail_pos;
         Eigen::VectorXd inTimes;
         int pieceNum = 0;
-        double sample_dt = 0.0;
-        bool init_obs = true;
         bool skip = false;
     } ctx_;
 
@@ -406,9 +437,6 @@ public:
     minco::MINCO_S3NU minco_;
     TrajType finalTraj_;
     lbfgs::lbfgs_parameter_t lbfgs_params_;
-    double w_obs = 1.0;
-    double w_smooth = 1.0;
-    double w_time = 1.0;
 };
 TrajectoryOpt::TrajectoryOpt(rose_map::RoseMap::Ptr rose_map, Parameters params) {
     _impl = std::make_unique<Impl>(rose_map, params);
@@ -416,12 +444,8 @@ TrajectoryOpt::TrajectoryOpt(rose_map::RoseMap::Ptr rose_map, Parameters params)
 TrajectoryOpt::~TrajectoryOpt() {
     _impl.reset();
 }
-void TrajectoryOpt::setSampledPath(
-    const std::vector<SampleTrajectoryPoint>& sampled,
-    double sample_dt,
-    RoboState now
-) {
-    _impl->setSampledPath(sampled, sample_dt, now);
+void TrajectoryOpt::setPath(const std::vector<Eigen::Vector2d>& path, RoboState now) {
+    _impl->setPath(path, now);
 }
 void TrajectoryOpt::optimize() {
     _impl->optimize();

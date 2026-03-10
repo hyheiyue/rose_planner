@@ -5,23 +5,18 @@ rose_planner_node:
     goal_topic: /rose_goal
     target_frame: map
     robot_size: [0.3, 0.3]
-    use_control_output: true
-    dynamic_replan: false
+    use_control_output: false
     default_wz: 0.0
     path_search:
       a_star: 
         clearance_weight: 2.0
         obstacle_penalty_weight: 10.0
         heuristic_weight: 1.0
-    resampler:
-        expected_speed: 3.0
-        max_acc: 3.0
-        dt: 0.1
     trajectory_opt:
       smooth_weight: 3.0
       obstacle_weight: 700.0
-      time_weight: 30.0
-      base_scale: 100.0
+      sample_ds: 0.3
+      expected_speed: 2.5
     mpc_control:
       fps: 50
       dt: 0.05

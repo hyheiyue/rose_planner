@@ -1395,5 +1395,245 @@ public:
         return tailPVA;
     }
 };
+class MINCO_S1NU {
+public:
+    MINCO_S1NU() = default;
 
+    ~MINCO_S1NU() {
+        A.destroy();
+    }
+
+private:
+    int N;
+
+    // [ px vx
+    //   py vy ]
+    Eigen::Matrix<double, 2, 2> headPV;
+    Eigen::Matrix<double, 2, 2> tailPV;
+
+    BandedSystem A;
+
+    // polynomial coeffs
+    Eigen::MatrixX2d b;
+
+    // time powers
+    Eigen::VectorXd T1;
+    Eigen::VectorXd T2;
+    Eigen::VectorXd T3;
+
+    Eigen::DiagonalMatrix<double, 2> energyWeights;
+
+public:
+    // ===== trajectory export =====
+    inline void getTrajectory(Trajectory<3, 2>& traj) const {
+        traj.clear();
+        traj.reserve(N);
+
+        for (int i = 0; i < N; i++) {
+            traj.emplace_back(T1(i), b.block<4, 2>(4 * i, 0).transpose().rowwise().reverse());
+        }
+    }
+
+    // ===== initialization =====
+    inline void setConditions(
+        const Eigen::Matrix<double, 2, 2>& headState,
+        const Eigen::Matrix<double, 2, 2>& tailState,
+        const int& pieceNum
+    ) {
+        N = pieceNum;
+
+        headPV = headState;
+        tailPV = tailState;
+
+        A.create(4 * N, 4, 4);
+
+        b.resize(4 * N, 2);
+
+        T1.resize(N);
+        T2.resize(N);
+        T3.resize(N);
+
+        energyWeights = Eigen::DiagonalMatrix<double, 2>(1.0, 1.0);
+    }
+
+    inline void setConditions(
+        const Eigen::Matrix<double, 2, 2>& headState,
+        const Eigen::Matrix<double, 2, 2>& tailState,
+        const int& pieceNum,
+        const Eigen::Vector2d energyWt
+    ) {
+        N = pieceNum;
+
+        headPV = headState;
+        tailPV = tailState;
+
+        A.create(4 * N, 4, 4);
+
+        b.resize(4 * N, 2);
+
+        T1.resize(N);
+        T2.resize(N);
+        T3.resize(N);
+
+        energyWeights = Eigen::DiagonalMatrix<double, 2>(energyWt.x(), energyWt.y());
+    }
+
+    inline void setHConditions(const Eigen::MatrixXd& headState) {
+        headPV = headState;
+    }
+
+    inline void setTConditions(const Eigen::MatrixXd& tailState) {
+        tailPV = tailState;
+    }
+
+public:
+    // ===== build linear system =====
+    inline void setParameters(const Eigen::MatrixXd& inPs, const Eigen::VectorXd& ts) {
+        T1 = ts;
+        T2 = T1.cwiseProduct(T1);
+        T3 = T2.cwiseProduct(T1);
+
+        A.reset();
+        b.setZero();
+
+        // ---- start constraints ----
+
+        // p(0) = p0
+        A(0, 0) = 1.0;
+
+        // v(0) = v0
+        A(1, 1) = 1.0;
+
+        b.row(0) = headPV.col(0).transpose();
+        b.row(1) = headPV.col(1).transpose();
+
+        // ---- middle constraints ----
+
+        for (int i = 0; i < N - 1; i++) {
+            int r = 4 * i + 2;
+
+            // waypoint
+            A(r, 4 * i + 0) = 1.0;
+            A(r, 4 * i + 1) = T1(i);
+            A(r, 4 * i + 2) = T2(i);
+            A(r, 4 * i + 3) = T3(i);
+
+            b.row(r) = inPs.col(i).transpose();
+
+            // position continuity
+            A(r + 1, 4 * i + 0) = 1.0;
+            A(r + 1, 4 * i + 1) = T1(i);
+            A(r + 1, 4 * i + 2) = T2(i);
+            A(r + 1, 4 * i + 3) = T3(i);
+
+            A(r + 1, 4 * i + 4) = -1.0;
+
+            // velocity continuity
+            A(r + 2, 4 * i + 1) = 1.0;
+            A(r + 2, 4 * i + 2) = 2 * T1(i);
+            A(r + 2, 4 * i + 3) = 3 * T2(i);
+
+            A(r + 2, 4 * i + 5) = -1.0;
+        }
+
+        // ---- end constraints ----
+
+        int r = 4 * N - 2;
+
+        // end position
+        A(r, 4 * N - 4) = 1.0;
+        A(r, 4 * N - 3) = T1(N - 1);
+        A(r, 4 * N - 2) = T2(N - 1);
+        A(r, 4 * N - 1) = T3(N - 1);
+
+        // end velocity
+        A(r + 1, 4 * N - 3) = 1.0;
+        A(r + 1, 4 * N - 2) = 2 * T1(N - 1);
+        A(r + 1, 4 * N - 1) = 3 * T2(N - 1);
+
+        b.row(r) = tailPV.col(0).transpose();
+        b.row(r + 1) = tailPV.col(1).transpose();
+
+        // ---- solve system ----
+        A.factorizeLU();
+        A.solve(b);
+    }
+
+public:
+    inline const Eigen::MatrixX2d& getCoeffs() const {
+        return b;
+    }
+
+public:
+    // ===== energy =====
+    inline void getEnergy(double& energy) const {
+        energy = 0.0;
+
+        for (int i = 0; i < N; i++) {
+            energy += 4.0 * (b.row(4 * i + 2) * energyWeights).dot(b.row(4 * i + 2)) * T1(i)
+                + 12.0 * (b.row(4 * i + 3) * energyWeights).dot(b.row(4 * i + 2)) * T2(i)
+                + 12.0 * (b.row(4 * i + 3) * energyWeights).dot(b.row(4 * i + 3)) * T3(i);
+        }
+    }
+
+public:
+    // ===== coeff gradient =====
+    inline void getEnergyPartialGradByCoeffs(Eigen::MatrixX2d& gdC) const {
+        gdC.resize(4 * N, 2);
+
+        for (int i = 0; i < N; i++) {
+            gdC.row(4 * i + 3) = 12.0 * b.row(4 * i + 2) * energyWeights * T2(i)
+                + 24.0 * b.row(4 * i + 3) * energyWeights * T3(i);
+
+            gdC.row(4 * i + 2) = 8.0 * b.row(4 * i + 2) * energyWeights * T1(i)
+                + 12.0 * b.row(4 * i + 3) * energyWeights * T2(i);
+
+            gdC.row(4 * i + 1).setZero();
+            gdC.row(4 * i + 0).setZero();
+        }
+    }
+
+public:
+    // ===== time gradient =====
+    inline void getEnergyPartialGradByTimes(Eigen::VectorXd& gdT) const {
+        gdT.resize(N);
+
+        for (int i = 0; i < N; i++) {
+            gdT(i) = 4.0 * (b.row(4 * i + 2) * energyWeights).dot(b.row(4 * i + 2))
+                + 24.0 * (b.row(4 * i + 3) * energyWeights).dot(b.row(4 * i + 2)) * T1(i)
+                + 36.0 * (b.row(4 * i + 3) * energyWeights).dot(b.row(4 * i + 3)) * T2(i);
+        }
+    }
+
+public:
+    // ===== gradient propagation =====
+    inline void propogateGrad(
+        const Eigen::MatrixX2d& partialGradByCoeffs,
+        const Eigen::VectorXd& partialGradByTimes,
+        Eigen::Matrix2Xd& gradByPoints,
+        Eigen::VectorXd& gradByTimes
+    ) {
+        gradByPoints.resize(2, N - 1);
+        gradByTimes.resize(N);
+
+        Eigen::MatrixX2d adjGrad = partialGradByCoeffs;
+
+        A.solveAdj(adjGrad);
+
+        for (int i = 0; i < N - 1; i++) {
+            gradByPoints.col(i) = adjGrad.row(4 * i + 2).transpose();
+        }
+
+        gradByTimes = partialGradByTimes;
+    }
+
+public:
+    inline Eigen::MatrixXd getHeadPV() {
+        return headPV;
+    }
+
+    inline Eigen::MatrixXd getTailPV() {
+        return tailPV;
+    }
+};
 } // namespace minco

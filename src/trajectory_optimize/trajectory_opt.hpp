@@ -16,11 +16,7 @@ public:
         return std::make_shared<TrajectoryOpt>(rose_map, params);
     }
 
-    void setSampledPath(
-        const std::vector<SampleTrajectoryPoint>& sampled,
-        double sample_dt,
-        RoboState now
-    );
+    void setPath(const std::vector<Eigen::Vector2d>& path, RoboState now);
     TrajType getTrajectory();
     void optimize();
     struct Impl;
